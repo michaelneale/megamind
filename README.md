@@ -2,7 +2,7 @@
 
 Cross-agent memory. If you use multiple coding agents, none of them know what you said to the others. megamind fixes that.
 
-It's a small CLI (`remember`) that searches conversation histories from Goose, Claude Code, Pi, Codex, Gemini, Amp, and OpenCode in parallel. Drop the included `SKILL.md` into `~/.skills/` and any agent that supports [Agent Skills](https://agentskills.io) can recall what you've discussed across all of them.
+It's a small CLI (`remember`) that searches conversation histories from Goose, Claude Code, Pi, Codex, Gemini, Amp, and OpenCode in parallel. Give your agents access via either an [Agent Skill](https://agentskills.io) or an [MCP](https://modelcontextprotocol.io) server — pick whichever your tooling supports.
 
 
 <img width="274" height="312" alt="image" src="https://github.com/user-attachments/assets/89f2ded5-282e-45d5-87ff-0fee03e24d80" />
@@ -13,7 +13,6 @@ It's a small CLI (`remember`) that searches conversation histories from Goose, C
 ```bash
 cargo build --release
 cp target/release/remember ~/.local/bin/
-mkdir -p ~/.skills/remember && cp SKILL.md ~/.skills/remember/
 ```
 
 
@@ -62,6 +61,29 @@ Auto-discovered — only available sources are queried.
 | **Gemini** | `~/.gemini/tmp/*/chats/` |
 | **Amp** | `~/.local/share/amp/threads/` |
 | **OpenCode** | `~/.local/share/opencode/storage/` |
+
+## MCP Server
+
+`remember` can also run as an [MCP](https://modelcontextprotocol.io) server over stdio, exposing a single `remember` tool. This lets any MCP-compatible client (Claude Desktop, Cursor, etc.) search your agent histories directly.
+
+```bash
+remember mcp
+```
+
+Add it to your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "remember": {
+      "command": "remember",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The tool accepts `query`, `keywords`, `after`, `before`, `limit`, and `mode` (`"all"` or `"any"`) — same parameters as the CLI.
 
 ## Adding Sources
 

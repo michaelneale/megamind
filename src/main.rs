@@ -1,5 +1,6 @@
 mod cache;
 mod engine;
+mod mcp;
 mod query;
 mod results;
 mod sources;
@@ -58,6 +59,8 @@ enum Commands {
     Sources,
     /// Clear the result cache
     ClearCache,
+    /// Run as an MCP server over stdio
+    Mcp,
 }
 
 fn parse_date(s: &str) -> anyhow::Result<chrono::DateTime<Utc>> {
@@ -69,9 +72,13 @@ fn parse_date(s: &str) -> anyhow::Result<chrono::DateTime<Utc>> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
     let engine = RecallEngine::new();
 
     match cli.command {
+        Some(Commands::Mcp) => {
+            return mcp::run_mcp_server().await;
+        }
         Some(Commands::Sources) => {
             let sources = engine.list_sources();
             println!("Available memory sources:");

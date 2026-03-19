@@ -36,3 +36,7 @@ dirs = "5"
 
 # Parallel futures
 futures = "0.3"
+
+# MCP server
+rmcp = { version = "1.2", features = ["server", "transport-io"] }
+schemars = "1"

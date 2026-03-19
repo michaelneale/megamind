@@ -339,7 +339,7 @@
   <section>
     <h2>The problem</h2>
     <p>You discuss architecture in Claude Code, debug in Codex, prototype in Goose, review in Amp. Each agent starts from zero every time. You end up repeating context, re-explaining decisions, and losing track of what was said where.</p>
-    <p>megamind is a single binary that searches all their conversation histories in parallel and returns what's relevant. Install it as an <a href="https://agentskills.io" style="color:var(--accent)">agent skill</a> and any agent can use it automatically.</p>
+    <p>megamind is a single binary that searches all their conversation histories in parallel and returns what's relevant. Install it as an <a href="https://agentskills.io" style="color:var(--accent)">agent skill</a> or connect it as an <a href="https://modelcontextprotocol.io" style="color:var(--accent2)">MCP server</a> — pick whichever your tooling supports.</p>
   </section>
 
   <section>
@@ -359,6 +359,11 @@
         <div class="icon">🧠</div>
         <h3>Agent skill</h3>
         <p>Drop SKILL.md into ~/.skills/ and agents call <code class="inline">remember</code> on their own.</p>
+      </div>
+      <div class="how-card">
+        <div class="icon">🔌</div>
+        <h3>MCP server</h3>
+        <p>Run <code class="inline">remember mcp</code> and any MCP client (Claude Desktop, Cursor, etc.) can use it.</p>
       </div>
       <div class="how-card">
         <div class="icon">🔒</div>
@@ -383,9 +388,21 @@ cargo build --release</code>
         <p>Or wherever you keep binaries.</p>
       </li>
       <li>
-        <h3>Install the agent skill</h3>
+        <h3>Connect your agents (pick one)</h3>
+        <p><strong>Option A: Agent Skill</strong> — for agents that support <a href="https://agentskills.io" style="color:var(--accent)">Agent Skills</a></p>
         <code class="cmd">mkdir -p ~/.skills/remember && cp SKILL.md ~/.skills/remember/</code>
-        <p>Now any agent that reads <code class="inline">~/.skills/</code> knows how to use it.</p>
+        <p>Now any agent that reads <code class="inline">~/.skills/</code> knows how to call <code class="inline">remember</code> as a CLI tool.</p>
+        <p style="margin-top:1rem"><strong>Option B: MCP Server</strong> — for agents that support <a href="https://modelcontextprotocol.io" style="color:var(--accent2)">MCP</a> (Claude Desktop, Cursor, etc.)</p>
+        <p>Add to your MCP client config:</p>
+        <code class="cmd">{
+  "mcpServers": {
+    "remember": {
+      "command": "remember",
+      "args": ["mcp"]
+    }
+  }
+}</code>
+        <p>This exposes a single <code class="inline">remember</code> tool over stdio with the same parameters as the CLI (<code class="inline">query</code>, <code class="inline">keywords</code>, <code class="inline">after</code>, <code class="inline">before</code>, <code class="inline">limit</code>, <code class="inline">mode</code>).</p>
       </li>
       <li>
         <h3>Verify</h3>
@@ -403,7 +420,8 @@ cargo build --release</code>
 <span class="prompt">$</span> remember -k mesh --after 2026-01-01 --before 2026-03-01
 <span class="prompt">$</span> remember -f json "error handling"
 <span class="prompt">$</span> remember sources
-<span class="prompt">$</span> remember clear-cache</pre>
+<span class="prompt">$</span> remember clear-cache
+<span class="prompt">$</span> remember mcp              <span class="meta"># start as MCP server over stdio</span></pre>
     </div>
     <p><code class="inline">-k</code> keyword (repeatable) · <code class="inline">--after</code> / <code class="inline">--before</code> date range · <code class="inline">-l</code> limit per source · <code class="inline">-f json</code> machine output · <code class="inline">--any</code> OR mode</p>
   </section>
