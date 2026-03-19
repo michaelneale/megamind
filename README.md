@@ -4,6 +4,10 @@ Cross-agent memory. If you use multiple coding agents, none of them know what yo
 
 It's a small CLI (`remember`) that searches conversation histories from Goose, Claude Code, Pi, Codex, Gemini, Amp, and OpenCode in parallel. Drop the included `SKILL.md` into `~/.skills/` and any agent that supports [Agent Skills](https://agentskills.io) can recall what you've discussed across all of them.
 
+
+<img width="274" height="312" alt="image" src="https://github.com/user-attachments/assets/89f2ded5-282e-45d5-87ff-0fee03e24d80" />
+
+
 ```
 $ remember -l 2 -k goose -k sandbox
 # Memory Recall: keywords: [goose, sandbox]
