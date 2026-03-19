@@ -8,6 +8,15 @@ It's a small CLI (`remember`) that searches conversation histories from Goose, C
 <img width="274" height="312" alt="image" src="https://github.com/user-attachments/assets/89f2ded5-282e-45d5-87ff-0fee03e24d80" />
 
 
+## Install
+
+```bash
+cargo build --release
+cp target/release/remember ~/.local/bin/
+mkdir -p ~/.skills/remember && cp SKILL.md ~/.skills/remember/
+```
+
+
 ```
 $ remember -l 2 -k goose -k sandbox
 # Memory Recall: keywords: [goose, sandbox]
@@ -26,13 +35,6 @@ Found 5 results across 7 sources in 50ms
    can we add sandbox support for goose sessions...
 ```
 
-## Install
-
-```bash
-cargo build --release
-cp target/release/remember ~/.local/bin/
-mkdir -p ~/.skills/remember && cp SKILL.md ~/.skills/remember/
-```
 
 ## Usage
 
