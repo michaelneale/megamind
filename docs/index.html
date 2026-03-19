@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>megamind — cross-agent memory</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --border: #1e1e2e;
+    --text: #e0e0e8;
+    --dim: #7a7a8e;
+    --accent: #6ee7b7;
+    --accent2: #818cf8;
+    --accent3: #f472b6;
+    --glow: rgba(110, 231, 183, 0.08);
+  }
+
+  body {
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  .hero {
+    padding: 6rem 2rem 4rem;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -40%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 800px;
+    height: 800px;
+    background: radial-gradient(circle, rgba(110,231,183,0.06) 0%, rgba(129,140,248,0.03) 40%, transparent 70%);
+    pointer-events: none;
+  }
+
+  .hero h1 {
+    font-size: clamp(3rem, 8vw, 5.5rem);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    background: linear-gradient(135deg, var(--accent), var(--accent2), var(--accent3));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 1.5rem;
+    position: relative;
+  }
+
+  .hero .tagline {
+    font-size: clamp(1.1rem, 2.5vw, 1.4rem);
+    color: var(--dim);
+    max-width: 600px;
+    margin: 0 auto 3rem;
+    line-height: 1.7;
+  }
+
+  .hero .tagline strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .agents-strip {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.6rem;
+    margin-bottom: 3rem;
+  }
+
+  .agent-pill {
+    padding: 0.4rem 1rem;
+    border-radius: 99px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--dim);
+    transition: all 0.2s;
+  }
+
+  .agent-pill:nth-child(1) { border-color: #f97316; color: #f97316; }
+  .agent-pill:nth-child(2) { border-color: #c084fc; color: #c084fc; }
+  .agent-pill:nth-child(3) { border-color: #38bdf8; color: #38bdf8; }
+  .agent-pill:nth-child(4) { border-color: #34d399; color: #34d399; }
+  .agent-pill:nth-child(5) { border-color: #60a5fa; color: #60a5fa; }
+  .agent-pill:nth-child(6) { border-color: #fb923c; color: #fb923c; }
+  .agent-pill:nth-child(7) { border-color: #f472b6; color: #f472b6; }
+
+  .content {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 2rem 6rem;
+  }
+
+  .terminal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin: 2.5rem 0;
+    overflow-x: auto;
+    position: relative;
+  }
+
+  .terminal::before {
+    content: '●  ●  ●';
+    display: block;
+    color: #333;
+    font-size: 0.65rem;
+    letter-spacing: 0.3rem;
+    margin-bottom: 1rem;
+    padding-bottom: 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .terminal pre {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    line-height: 1.7;
+    color: var(--dim);
+    white-space: pre;
+  }
+
+  .terminal .prompt { color: var(--accent); }
+  .terminal .result { color: var(--text); }
+  .terminal .source { color: var(--accent2); font-weight: 500; }
+  .terminal .meta { color: var(--dim); }
+  .terminal .hit { color: var(--accent3); }
+
+  section {
+    margin: 4rem 0;
+  }
+
+  section h2 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin-bottom: 1.2rem;
+    color: var(--text);
+  }
+
+  section p {
+    color: var(--dim);
+    margin-bottom: 1rem;
+    font-size: 1.05rem;
+  }
+
+  .install-steps {
+    list-style: none;
+    counter-reset: step;
+  }
+
+  .install-steps li {
+    counter-increment: step;
+    position: relative;
+    padding-left: 3rem;
+    margin-bottom: 2rem;
+  }
+
+  .install-steps li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 0.1rem;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--accent);
+  }
+
+  .install-steps li h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: var(--text);
+  }
+
+  .install-steps li p {
+    font-size: 0.95rem;
+    margin-bottom: 0.5rem;
+  }
+
+  code.inline {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85em;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 0.15em 0.5em;
+    border-radius: 4px;
+    color: var(--accent);
+  }
+
+  .cmd {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 0.8rem 1.2rem;
+    border-radius: 8px;
+    color: var(--text);
+    display: block;
+    margin: 0.5rem 0;
+    overflow-x: auto;
+  }
+
+  .how-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-top: 1.5rem;
+  }
+
+  .how-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem;
+    transition: border-color 0.2s;
+  }
+
+  .how-card:hover { border-color: var(--accent); }
+
+  .how-card .icon {
+    font-size: 1.5rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .how-card h3 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 0.3rem;
+    color: var(--text);
+  }
+
+  .how-card p {
+    font-size: 0.85rem;
+    color: var(--dim);
+    margin: 0;
+  }
+
+  .cta {
+    text-align: center;
+    margin: 5rem 0 2rem;
+  }
+
+  .cta a {
+    display: inline-block;
+    padding: 0.9rem 2.5rem;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: var(--bg);
+    font-weight: 700;
+    font-size: 1.05rem;
+    border-radius: 99px;
+    text-decoration: none;
+    transition: opacity 0.2s;
+  }
+
+  .cta a:hover { opacity: 0.85; }
+
+  .cta p {
+    margin-top: 1rem;
+    font-size: 0.9rem;
+    color: var(--dim);
+  }
+
+  footer {
+    text-align: center;
+    padding: 3rem 2rem;
+    color: var(--dim);
+    font-size: 0.85rem;
+    border-top: 1px solid var(--border);
+  }
+
+  footer a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>megamind</h1>
+  <p class="tagline">
+    You talk to <strong>seven different coding agents</strong>. None of them know what you said to the others. megamind gives them all a shared memory.
+  </p>
+  <div class="agents-strip">
+    <span class="agent-pill">Goose</span>
+    <span class="agent-pill">Claude Code</span>
+    <span class="agent-pill">Pi</span>
+    <span class="agent-pill">Codex</span>
+    <span class="agent-pill">Gemini</span>
+    <span class="agent-pill">Amp</span>
+    <span class="agent-pill">OpenCode</span>
+  </div>
+</div>
+
+<div class="content">
+
+  <div class="terminal">
+    <pre><span class="prompt">$</span> remember -l 2 -k auth -k tokens
+<span class="result"># Memory Recall: keywords: [auth, tokens]</span>
+<span class="meta">Found 8 results across 7 sources in 47ms</span>
+
+<span class="source">## Claude Code</span> <span class="meta">(2 results, 12ms)</span>
+<span class="meta">1. [2026-03-11 04:19] (session: /app/backend)</span> <span class="hit">[assistant]</span>
+   We decided on short-lived JWTs with rotating refresh tokens.
+   The auth middleware validates on every request...
+
+<span class="source">## Codex</span> <span class="meta">(2 results, 8ms)</span>
+<span class="meta">1. [2026-03-14 09:30] (session: /app/backend)</span> <span class="hit">[user]</span>
+   update the token rotation to use 15 min expiry instead of 1hr
+
+<span class="source">## Pi</span> <span class="meta">(2 results, 23ms)</span>
+<span class="meta">1. [2026-03-15 14:02] (session: /app/mobile)</span> <span class="hit">[assistant]</span>
+   The mobile client stores tokens in secure keychain storage...</pre>
+  </div>
+
+  <section>
+    <h2>The problem</h2>
+    <p>You discuss architecture in Claude Code, debug in Codex, prototype in Goose, review in Amp. Each agent starts from zero every time. You end up repeating context, re-explaining decisions, and losing track of what was said where.</p>
+    <p>megamind is a single binary that searches all their conversation histories in parallel and returns what's relevant. Install it as an <a href="https://agentskills.io" style="color:var(--accent)">agent skill</a> and any agent can use it automatically.</p>
+  </section>
+
+  <section>
+    <h2>How it works</h2>
+    <div class="how-grid">
+      <div class="how-card">
+        <div class="icon">🔍</div>
+        <h3>Auto-discover</h3>
+        <p>Finds all installed agents by checking their known data paths. No config needed.</p>
+      </div>
+      <div class="how-card">
+        <div class="icon">⚡</div>
+        <h3>Parallel search</h3>
+        <p>Queries all sources concurrently. Typical search across 7 agents in under 50ms.</p>
+      </div>
+      <div class="how-card">
+        <div class="icon">🧠</div>
+        <h3>Agent skill</h3>
+        <p>Drop SKILL.md into ~/.skills/ and agents call <code class="inline">remember</code> on their own.</p>
+      </div>
+      <div class="how-card">
+        <div class="icon">🔒</div>
+        <h3>Read-only</h3>
+        <p>Never writes to any agent's database. Just reads local session files.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Install</h2>
+    <ol class="install-steps">
+      <li>
+        <h3>Clone and build</h3>
+        <code class="cmd">git clone https://github.com/michaelneale/megamind.git
+cd megamind
+cargo build --release</code>
+      </li>
+      <li>
+        <h3>Put it on your PATH</h3>
+        <code class="cmd">cp target/release/remember ~/.local/bin/</code>
+        <p>Or wherever you keep binaries.</p>
+      </li>
+      <li>
+        <h3>Install the agent skill</h3>
+        <code class="cmd">mkdir -p ~/.skills/remember && cp SKILL.md ~/.skills/remember/</code>
+        <p>Now any agent that reads <code class="inline">~/.skills/</code> knows how to use it.</p>
+      </li>
+      <li>
+        <h3>Verify</h3>
+        <code class="cmd">remember sources</code>
+        <p>Should show ✓ next to every agent you have installed.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Usage</h2>
+    <div class="terminal">
+      <pre><span class="prompt">$</span> remember "what was the deploy strategy"
+<span class="prompt">$</span> remember -k rust -k sqlite
+<span class="prompt">$</span> remember -k mesh --after 2026-01-01 --before 2026-03-01
+<span class="prompt">$</span> remember -f json "error handling"
+<span class="prompt">$</span> remember sources
+<span class="prompt">$</span> remember clear-cache</pre>
+    </div>
+    <p><code class="inline">-k</code> keyword (repeatable) · <code class="inline">--after</code> / <code class="inline">--before</code> date range · <code class="inline">-l</code> limit per source · <code class="inline">-f json</code> machine output · <code class="inline">--any</code> OR mode</p>
+  </section>
+
+  <div class="cta">
+    <a href="https://github.com/michaelneale/megamind">View on GitHub →</a>
+    <p>MIT licensed · Rust · ~1500 lines</p>
+  </div>
+
+</div>
+
+<footer>
+  <a href="https://github.com/michaelneale/megamind">megamind</a> — cross-agent memory
+</footer>
+
+</body>
+</html>
