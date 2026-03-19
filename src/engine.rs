@@ -88,6 +88,8 @@ impl RecallEngine {
             Box::new(sources::pi::PiSource::new()),
             Box::new(sources::codex::CodexSource::new()),
             Box::new(sources::gemini::GeminiSource::new()),
+            Box::new(sources::amp::AmpSource::new()),
+            Box::new(sources::opencode::OpenCodeSource::new()),
         ];
 
         all_sources
