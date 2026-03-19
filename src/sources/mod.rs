@@ -1,7 +1,8 @@
 pub mod goose;
 pub mod claude;
 pub mod pi;
-pub mod perception;
+pub mod codex;
+pub mod gemini;
 
 use crate::query::RecallQuery;
 use crate::results::SourceResults;
@@ -27,7 +28,8 @@ pub fn discover_sources() -> Vec<Box<dyn MemorySource>> {
         Box::new(goose::GooseSource::new()),
         Box::new(claude::ClaudeSource::new()),
         Box::new(pi::PiSource::new()),
-        Box::new(perception::PerceptionSource::new()),
+        Box::new(codex::CodexSource::new()),
+        Box::new(gemini::GeminiSource::new()),
     ];
 
     // Only keep sources that are actually available

@@ -86,7 +86,8 @@ impl RecallEngine {
             Box::new(sources::goose::GooseSource::new()),
             Box::new(sources::claude::ClaudeSource::new()),
             Box::new(sources::pi::PiSource::new()),
-            Box::new(sources::perception::PerceptionSource::new()),
+            Box::new(sources::codex::CodexSource::new()),
+            Box::new(sources::gemini::GeminiSource::new()),
         ];
 
         all_sources

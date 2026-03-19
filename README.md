@@ -1,11 +1,11 @@
-# remember
+# megamind
 
-A fast CLI memory recall tool for agents. Searches across multiple conversation histories and perception data sources in parallel.
+Fast CLI memory recall for agents. Searches conversation histories in parallel.
 
 ```
 $ remember "goose perception" -l 5
 # Memory Recall: "goose perception"
-Found 16 results across 4 sources in 13ms
+Found 16 results across 5 sources in 13ms
 ...
 ```
 
@@ -13,89 +13,47 @@ Found 16 results across 4 sources in 13ms
 
 ```bash
 cargo build --release
-cp target/release/remember ~/.local/bin/  # or wherever you keep binaries
+cp target/release/remember ~/.local/bin/
 ```
+
+### Pi Agent Skill
+
+```bash
+mkdir -p ~/.pi/agent/skills/remember
+cp SKILL.md ~/.pi/agent/skills/remember/SKILL.md
+```
+
+Requires `remember` on your `$PATH`.
 
 ## Usage
 
 ```bash
-# Free-text query
 remember "what was I working on yesterday"
-
-# Keyword search
 remember -k rust -k sqlite
-
-# Date range
 remember -k mesh --after 2026-01-01 --before 2026-02-01
-
-# Combine everything
-remember "distributed systems" -k gossip -k mesh --after 2026-02-01 -l 10
-
-# JSON output (for programmatic use by agents)
+remember "distributed systems" -k gossip -l 10
 remember -f json "perception"
-
-# List available data sources
 remember sources
-
-# Clear result cache
 remember clear-cache
 ```
 
+Flags: `-k` keyword (repeatable), `--after`/`--before` date range, `-l` limit per source, `-f json` for machine output, `--any` for OR mode (default is AND).
+
 ## Data Sources
+
+Auto-discovered — only available sources are queried.
 
 | Source | Storage | What it searches |
 |--------|---------|-----------------|
-| **Goose** | `~/.local/share/goose/sessions/sessions.db` (SQLite) | All goose conversation messages |
-| **Claude Code** | `~/.claude/projects/*/` (JSONL files) | Claude Code session transcripts |
-| **Pi** | `~/.pi/agent/sessions/*/` (JSONL files) | Pi agent session transcripts |
-| **Perception** | `~/Library/Application Support/GoosePerception/perception.sqlite` | Screen OCR, voice transcripts, insights, mood/emotion data |
+| **Goose** | `~/.local/share/goose/sessions/` | Conversation messages (SQLite + JSONL) |
+| **Claude Code** | `~/.claude/projects/*/` (JSONL) | Session transcripts |
+| **Pi** | `~/.pi/agent/sessions/*/` (JSONL) | Session transcripts |
+| **Codex** | `~/.codex/sessions/` (JSONL) | Session transcripts |
+| **Gemini** | `~/.gemini/tmp/*/chats/` (JSON) | Session transcripts |
 
-Sources are auto-discovered — only available sources are queried.
+## Design
 
-## Architecture
-
-```
-┌─────────────┐
-│  CLI (clap)  │
-└──────┬──────┘
-       │
-┌──────▼──────┐     ┌─────────┐
-│ RecallEngine ├────►│  Cache   │  SHA256-keyed, 5min TTL
-└──────┬──────┘     └─────────┘
-       │
-       │ parallel fan-out (tokio + futures::join_all)
-       │
-  ┌────┴────┬────────┬──────────┐
-  ▼         ▼        ▼          ▼
-┌────┐  ┌───────┐  ┌───┐  ┌──────────┐
-│Goose│  │Claude │  │ Pi│  │Perception│
-│(SQL)│  │(JSONL)│  │(J)│  │  (SQL)   │
-└────┘  └───────┘  └───┘  └──────────┘
-```
-
-- **Modular**: Each source implements the `MemorySource` trait
-- **Parallel**: All sources are queried concurrently via tokio
-- **Cached**: Results are cached by query hash (in-memory + file-backed, 5min TTL)
-- **Fast**: Release build searches 100K+ messages across 4 sources in ~13ms
-- **Read-only**: Never writes to any source database
-
-## Adding New Sources
-
-Implement the `MemorySource` trait:
-
-```rust
-#[async_trait]
-pub trait MemorySource: Send + Sync {
-    fn name(&self) -> &str;
-    fn is_available(&self) -> bool;
-    async fn search(&self, query: &RecallQuery) -> anyhow::Result<SourceResults>;
-}
-```
-
-Then register it in `src/sources/mod.rs` → `discover_sources()`.
-
-## Cache
-
-Results are cached in `~/.cache/remember/` with a 5-minute TTL. Cache keys are SHA256 hashes of normalized query parameters (search terms sorted + date range + limit).
-
-Identical or similar queries within the TTL window return instantly from cache.
+- Each source implements `MemorySource` trait — add new ones in `src/sources/`
+- All sources queried concurrently via tokio
+- Results cached in `~/.cache/remember/` with 5min TTL
+- Read-only — never writes to source databases
