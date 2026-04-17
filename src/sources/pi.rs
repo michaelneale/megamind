@@ -18,14 +18,6 @@ impl PiSource {
             sessions_dir: home.join(".pi/agent/sessions"),
         }
     }
-
-    /// Decode a pi session dir name back to a path
-    /// e.g. "--Users-micn-Documents-code-pi--" -> "/Users/micn/Documents/code/pi"
-    fn decode_session_dir(name: &str) -> String {
-        // Pi uses -- as prefix/suffix delimiters and - as path separator
-        let trimmed = name.trim_start_matches('-').trim_end_matches('-');
-        format!("/{}", trimmed.replace('-', "/"))
-    }
 }
 
 #[async_trait]
@@ -66,10 +58,7 @@ impl MemorySource for PiSource {
                     continue;
                 }
 
-                let dir_name = project_entry.file_name().to_string_lossy().to_string();
-                let project_path = PiSource::decode_session_dir(&dir_name);
-
-                // Read all .jsonl files in the project
+                // Read all .jsonl files in the project dir
                 let session_files = match std::fs::read_dir(project_entry.path()) {
                     Ok(d) => d,
                     Err(_) => continue,
@@ -91,8 +80,9 @@ impl MemorySource for PiSource {
                         Err(_) => continue,
                     };
 
-                    // Extract session id from first line
+                    // Extract session id and cwd from the session header line
                     let mut session_id = file_name.trim_end_matches(".jsonl").to_string();
+                    let mut project_path: Option<String> = None;
                     
                     for line in content.lines() {
                         let entry: serde_json::Value = match serde_json::from_str(line) {
@@ -102,10 +92,13 @@ impl MemorySource for PiSource {
 
                         let entry_type = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-                        // Update session_id from session header
+                        // Extract session_id and cwd from session header
                         if entry_type == "session" {
                             if let Some(id) = entry.get("id").and_then(|i| i.as_str()) {
                                 session_id = id.to_string();
+                            }
+                            if let Some(cwd) = entry.get("cwd").and_then(|c| c.as_str()) {
+                                project_path = Some(cwd.to_string());
                             }
                             continue;
                         }
@@ -157,7 +150,7 @@ impl MemorySource for PiSource {
                             content: text,
                             role: Some(role),
                             session_id: Some(session_id.clone()),
-                            session_name: Some(project_path.clone()),
+                            session_name: project_path.clone(),
                             relevance: hit_count as f64,
                             metadata: None,
                         });

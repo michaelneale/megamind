@@ -116,7 +116,7 @@ impl GooseSource {
         let sql = format!(
             r#"
             SELECT m.role, m.content_json, m.timestamp, m.created_timestamp,
-                   s.id as session_id, s.name as session_name
+                   s.id as session_id, s.name as session_name, s.working_dir
             FROM messages m
             JOIN sessions s ON m.session_id = s.id
             {}
@@ -137,12 +137,13 @@ impl GooseSource {
             let _created_ts: Option<i64> = row.get(3)?;
             let session_id: String = row.get(4)?;
             let session_name: Option<String> = row.get(5)?;
-            Ok((role, content_json, timestamp, session_id, session_name))
+            let working_dir: Option<String> = row.get(6)?;
+            Ok((role, content_json, timestamp, session_id, session_name, working_dir))
         })?;
 
         let mut results = Vec::new();
         for row in rows {
-            let (role, content_json, timestamp_str, session_id, session_name) = row?;
+            let (role, content_json, timestamp_str, session_id, session_name, working_dir) = row?;
             let content = GooseSource::extract_text_content(&content_json);
 
             if content.trim().is_empty() {
@@ -156,7 +157,9 @@ impl GooseSource {
             let (_, hit_count) = query.matches_text(&content);
             let relevance = hit_count as f64;
 
-            let display_name = session_name.filter(|n| !n.is_empty());
+            let display_name = session_name
+                .filter(|n| !n.is_empty())
+                .or(working_dir.filter(|w| !w.is_empty()));
 
             results.push(MemoryResult {
                 source: "goose".to_string(),
