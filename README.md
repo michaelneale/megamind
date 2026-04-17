@@ -10,10 +10,19 @@ It's a small CLI (`remember`) that searches conversation histories from Goose, C
 
 ## Install
 
+**macOS (Apple Silicon):**
+
 ```bash
-cargo build --release
-cp target/release/remember ~/.local/bin/
+curl -fsSL https://github.com/michaelneale/megamind/releases/latest/download/remember-darwin-arm64.tar.gz | tar xz -C /usr/local/bin
 ```
+
+**From source (any platform):**
+
+```bash
+cargo install --git https://github.com/michaelneale/megamind.git
+```
+
+[Latest release →](https://github.com/michaelneale/megamind/releases/latest)
 
 
 ```
