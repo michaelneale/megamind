@@ -10,11 +10,13 @@ It's a small CLI (`remember`) that searches conversation histories from Goose, C
 
 ## Install
 
-**macOS (Apple Silicon):**
+**macOS (Apple Silicon) — no sudo required:**
 
 ```bash
-curl -fsSL https://github.com/michaelneale/megamind/releases/latest/download/remember-darwin-arm64.tar.gz | tar xz -C /usr/local/bin
+mkdir -p ~/.local/bin && curl -fsSL https://github.com/michaelneale/megamind/releases/latest/download/remember-darwin-arm64.tar.gz | tar xz -C ~/.local/bin
 ```
+
+> Add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile if it's not already there.
 
 **From source (any platform):**
 
@@ -23,6 +25,23 @@ cargo install --git https://github.com/michaelneale/megamind.git
 ```
 
 [Latest release →](https://github.com/michaelneale/megamind/releases/latest)
+
+### Give your agents access
+
+Install the [Agent Skill](https://agentskills.io) so your agents know how to use `remember`:
+
+```bash
+# Pi
+git clone https://github.com/michaelneale/megamind.git /tmp/megamind && cp -r /tmp/megamind/skill ~/.pi/agent/skills/remember
+
+# Claude Code
+git clone https://github.com/michaelneale/megamind.git /tmp/megamind && cp -r /tmp/megamind/skill ~/.claude/skills/remember
+
+# Any agent that supports ~/.agents/skills
+git clone https://github.com/michaelneale/megamind.git /tmp/megamind && mkdir -p ~/.agents/skills && cp -r /tmp/megamind/skill ~/.agents/skills/remember
+```
+
+Or use the [MCP server](#mcp-server) if your tooling supports it.
 
 
 ```
