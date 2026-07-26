@@ -27,9 +27,9 @@ impl RecallEngine {
             return cached;
         }
 
-        // Discover available sources
-        let sources = sources::discover_sources();
-        
+        // Discover available sources (honoring the query's --source filter)
+        let sources = sources::discover_sources(query);
+
         if sources.is_empty() {
             return RecallResults {
                 query_summary: format_query_summary(query),
@@ -45,17 +45,11 @@ impl RecallEngine {
             .iter()
             .map(|source| {
                 let query = query.clone();
-                let name = source.name().to_string();
+                let kind = source.kind();
                 async move {
                     match source.search(&query).await {
                         Ok(results) => results,
-                        Err(e) => SourceResults {
-                            source_name: name,
-                            results: vec![],
-                            total_matched: 0,
-                            search_time_ms: 0,
-                            error: Some(e.to_string()),
-                        },
+                        Err(e) => SourceResults::failed(kind, e.to_string()),
                     }
                 }
             })
@@ -80,19 +74,9 @@ impl RecallEngine {
         results
     }
 
-    /// List all available sources and their status
+    /// List all sources and their availability status
     pub fn list_sources(&self) -> Vec<(String, bool)> {
-        let all_sources: Vec<Box<dyn sources::MemorySource>> = vec![
-            Box::new(sources::goose::GooseSource::new()),
-            Box::new(sources::claude::ClaudeSource::new()),
-            Box::new(sources::pi::PiSource::new()),
-            Box::new(sources::codex::CodexSource::new()),
-            Box::new(sources::gemini::GeminiSource::new()),
-            Box::new(sources::amp::AmpSource::new()),
-            Box::new(sources::opencode::OpenCodeSource::new()),
-        ];
-
-        all_sources
+        sources::all_sources()
             .iter()
             .map(|s| (s.name().to_string(), s.is_available()))
             .collect()
@@ -106,29 +90,32 @@ impl RecallEngine {
 
 fn format_query_summary(query: &RecallQuery) -> String {
     use crate::query::MatchMode;
-    
+
     let mut parts = Vec::new();
-    
+
     if let Some(ref text) = query.text {
         parts.push(format!("\"{}\"", text));
     }
-    
+
     if !query.keywords.is_empty() {
         parts.push(format!("keywords: [{}]", query.keywords.join(", ")));
     }
 
     let terms = query.search_terms();
     if terms.len() > 1 {
-        parts.push(format!("mode: {}", match query.mode {
-            MatchMode::And => "ALL must match",
-            MatchMode::Or => "ANY can match",
-        }));
+        parts.push(format!(
+            "mode: {}",
+            match query.mode {
+                MatchMode::And => "ALL must match",
+                MatchMode::Or => "ANY can match",
+            }
+        ));
     }
-    
+
     if let Some(ref after) = query.after {
         parts.push(format!("after: {}", after.format("%Y-%m-%d")));
     }
-    
+
     if let Some(ref before) = query.before {
         parts.push(format!("before: {}", before.format("%Y-%m-%d")));
     }

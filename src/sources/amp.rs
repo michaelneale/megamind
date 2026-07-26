@@ -1,6 +1,7 @@
 use crate::query::RecallQuery;
 use crate::results::{MemoryResult, SourceResults};
 use crate::sources::MemorySource;
+use crate::types::{Role, SourceKind};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use std::path::PathBuf;
@@ -25,7 +26,10 @@ impl AmpSource {
             .filter_map(|block| {
                 let btype = block.get("type")?.as_str()?;
                 if btype == "text" {
-                    block.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                    block
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
@@ -37,8 +41,8 @@ impl AmpSource {
 
 #[async_trait]
 impl MemorySource for AmpSource {
-    fn name(&self) -> &str {
-        "Amp"
+    fn kind(&self) -> SourceKind {
+        SourceKind::Amp
     }
 
     fn is_available(&self) -> bool {
@@ -78,8 +82,16 @@ impl MemorySource for AmpSource {
                     Err(_) => continue,
                 };
 
-                let thread_id = thread.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let title = thread.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let thread_id = thread
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let title = thread
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
                 // Get workspace directory from env.initial.trees[0].uri
                 let session_name = thread
@@ -91,7 +103,13 @@ impl MemorySource for AmpSource {
                     .and_then(|t| t.get("uri"))
                     .and_then(|u| u.as_str())
                     .map(|uri| uri.strip_prefix("file://").unwrap_or(uri).to_string())
-                    .or_else(|| if !title.is_empty() { Some(title.clone()) } else { None });
+                    .or_else(|| {
+                        if !title.is_empty() {
+                            Some(title.clone())
+                        } else {
+                            None
+                        }
+                    });
 
                 // Thread-level timestamp for coarse date filtering
                 let thread_created = thread
@@ -115,9 +133,13 @@ impl MemorySource for AmpSource {
 
                 for msg in messages {
                     let role = match msg.get("role").and_then(|r| r.as_str()) {
-                        Some(r @ ("user" | "assistant")) => r,
+                        Some(r @ ("user" | "assistant")) => Role::from_raw(r),
                         _ => continue,
                     };
+
+                    if !query.wants_role(Some(&role)) {
+                        continue;
+                    }
 
                     let content_arr = match msg.get("content").and_then(|c| c.as_array()) {
                         Some(c) => c,
@@ -150,10 +172,10 @@ impl MemorySource for AmpSource {
                     }
 
                     results.push(MemoryResult {
-                        source: "amp".to_string(),
+                        source: SourceKind::Amp,
                         timestamp,
                         content: text,
-                        role: Some(role.to_string()),
+                        role: Some(role),
                         session_id: Some(thread_id.clone()),
                         session_name: session_name.clone(),
                         relevance: hit_count as f64,
@@ -183,14 +205,86 @@ impl MemorySource for AmpSource {
         .await??;
 
         let elapsed = start.elapsed().as_millis() as u64;
-        let total = results.len();
+        Ok(SourceResults::new(SourceKind::Amp, results, elapsed))
+    }
+}
 
-        Ok(SourceResults {
-            source_name: "Amp".to_string(),
-            results,
-            total_matched: total,
-            search_time_ms: elapsed,
-            error: None,
-        })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_text_joins_only_text_blocks() {
+        let blocks = vec![
+            serde_json::json!({"type":"text","text":"hello"}),
+            serde_json::json!({"type":"tool_use","name":"bash"}),
+            serde_json::json!({"type":"text","text":"world"}),
+        ];
+        assert_eq!(AmpSource::extract_text(&blocks), "hello\nworld");
+        assert_eq!(AmpSource::extract_text(&[]), "");
+    }
+
+    fn write_amp_thread(threads_dir: &std::path::Path) {
+        // created = 2026-02-18T21:19:00Z in epoch millis.
+        let created_ms = 1_771_449_540_000i64;
+        let thread = serde_json::json!({
+            "id": "thread-1",
+            "title": "sandbox chat",
+            "created": created_ms,
+            "env": {"initial": {"trees": [{"uri": "file:///Development/goose"}]}},
+            "messages": [
+                {"role":"user","content":[{"type":"text","text":"can we add sandbox support for goose"}]},
+                {"role":"assistant","content":[{"type":"text","text":"yes, sandbox support is feasible"}]}
+            ]
+        });
+        std::fs::write(
+            threads_dir.join("thread-1.json"),
+            serde_json::to_string(&thread).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_reads_workspace_uri_and_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        write_amp_thread(dir.path());
+        let source = AmpSource {
+            threads_dir: dir.path().to_path_buf(),
+        };
+
+        let query = RecallQuery {
+            keywords: vec!["sandbox".to_string()],
+            ..Default::default()
+        };
+        let out = source.search(&query).await.unwrap();
+        assert_eq!(out.source, SourceKind::Amp);
+        assert_eq!(out.results.len(), 2);
+        // The file:// prefix is stripped from the workspace URI.
+        assert!(out
+            .results
+            .iter()
+            .all(|r| r.session_name.as_deref() == Some("/Development/goose")));
+        assert!(out
+            .results
+            .iter()
+            .all(|r| r.session_id.as_deref() == Some("thread-1")));
+    }
+
+    #[tokio::test]
+    async fn search_applies_role_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        write_amp_thread(dir.path());
+        let source = AmpSource {
+            threads_dir: dir.path().to_path_buf(),
+        };
+
+        let query = RecallQuery {
+            keywords: vec!["sandbox".to_string()],
+            roles: vec![Role::User],
+            ..Default::default()
+        };
+        let out = source.search(&query).await.unwrap();
+        assert_eq!(out.results.len(), 1);
+        assert_eq!(out.results[0].role, Some(Role::User));
     }
 }

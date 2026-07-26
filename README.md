@@ -69,12 +69,17 @@ Found 5 results across 7 sources in 50ms
 remember "what was the auth approach we discussed"
 remember -k rust -k sqlite
 remember -k deploy --after 2026-01-01 --before 2026-02-01
+remember -k auth --source goose --source claude
+remember "deploy" --role user
 remember -f json "error handling"
 remember sources
 remember clear-cache
 ```
 
-Flags: `-k` keyword (repeatable), `--after`/`--before` date range, `-l` limit per source (default 20), `-f json` for machine output, `--any` for OR mode (default AND).
+Flags: `-k` keyword (repeatable), `--after`/`--before` date range, `-l` limit per source (default 20), `-s`/`--source` restrict to session types (repeatable), `-r`/`--role` restrict to message roles (repeatable), `-f json` for machine output, `--any` for OR mode (default AND).
+
+- `--source` accepts: `goose`, `claude`, `pi`, `codex`, `gemini`, `amp`, `opencode`.
+- `--role` accepts: `user`, `assistant`, `system`, `tool`. Roles are normalized across agents (e.g. Gemini's `gemini` turn and Codex's `developer` scaffolding map to `assistant` and `system`).
 
 ## Sources
 
@@ -111,7 +116,7 @@ Add it to your MCP client config:
 }
 ```
 
-The tool accepts `query`, `keywords`, `after`, `before`, `limit`, and `mode` (`"all"` or `"any"`) — same parameters as the CLI.
+The tool accepts `query`, `keywords`, `after`, `before`, `limit`, `mode` (`"all"` or `"any"`), `sources` (e.g. `["goose", "claude"]`), and `roles` (e.g. `["user", "assistant"]`) — same parameters as the CLI.
 
 ## Adding Sources
 

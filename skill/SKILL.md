@@ -28,6 +28,8 @@ remember "what was the auth approach we discussed"
 remember -k rust -k sqlite
 remember -k deploy --after 2026-01-01 --before 2026-02-01
 remember "distributed systems" -k gossip --after 2026-02-01 -l 10
+remember -k auth --source goose --source claude
+remember "deploy" --role user
 remember "foo" -k bar --any
 remember -f json "perception"
 remember sources
@@ -39,6 +41,8 @@ remember sources
 - `--after YYYY-MM-DD` — Results after this date
 - `--before YYYY-MM-DD` — Results before this date
 - `-l <n>` — Max results per source (default: 20)
+- `-s <source>` — Restrict to session types: goose, claude, pi, codex, gemini, amp, opencode (repeatable)
+- `-r <role>` — Restrict to message roles: user, assistant, system, tool (repeatable)
 - `-f json` — JSON output (useful for programmatic parsing)
 - `--any` — OR mode instead of AND (default is AND)
 

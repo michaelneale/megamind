@@ -1,6 +1,7 @@
 use crate::query::RecallQuery;
 use crate::results::{MemoryResult, SourceResults};
 use crate::sources::MemorySource;
+use crate::types::{Role, SourceKind};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
@@ -28,8 +29,8 @@ impl ClaudeSource {
 
 #[async_trait]
 impl MemorySource for ClaudeSource {
-    fn name(&self) -> &str {
-        "Claude Code"
+    fn kind(&self) -> SourceKind {
+        SourceKind::Claude
     }
 
     fn is_available(&self) -> bool {
@@ -59,8 +60,12 @@ impl MemorySource for ClaudeSource {
                     Ok(e) => e,
                     Err(_) => continue,
                 };
-                
-                if !project_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+
+                if !project_entry
+                    .file_type()
+                    .map(|t| t.is_dir())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
 
@@ -99,14 +104,17 @@ impl MemorySource for ClaudeSource {
                         };
 
                         let entry_type = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        
+
                         // We care about user and assistant messages
                         if entry_type != "user" && entry_type != "assistant" {
                             continue;
                         }
 
                         // Parse timestamp
-                        let timestamp_str = entry.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+                        let timestamp_str = entry
+                            .get("timestamp")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
                         let timestamp = DateTime::parse_from_rfc3339(timestamp_str)
                             .map(|dt| dt.with_timezone(&Utc))
                             .unwrap_or_else(|_| Utc::now());
@@ -138,14 +146,20 @@ impl MemorySource for ClaudeSource {
                             continue;
                         }
 
-                        let role = entry.get("message")
-                            .and_then(|m| m.get("role"))
-                            .and_then(|r| r.as_str())
-                            .unwrap_or(entry_type)
-                            .to_string();
+                        let role = Role::from_raw(
+                            entry
+                                .get("message")
+                                .and_then(|m| m.get("role"))
+                                .and_then(|r| r.as_str())
+                                .unwrap_or(entry_type),
+                        );
+
+                        if !query.wants_role(Some(&role)) {
+                            continue;
+                        }
 
                         results.push(MemoryResult {
-                            source: "claude".to_string(),
+                            source: SourceKind::Claude,
                             timestamp,
                             content: text,
                             role: Some(role),
@@ -169,25 +183,19 @@ impl MemorySource for ClaudeSource {
 
             // Sort by relevance then timestamp
             results.sort_by(|a, b| {
-                b.relevance.partial_cmp(&a.relevance)
+                b.relevance
+                    .partial_cmp(&a.relevance)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then(b.timestamp.cmp(&a.timestamp))
             });
 
             results.truncate(query.limit);
             Ok(results)
-        }).await??;
+        })
+        .await??;
 
         let elapsed = start.elapsed().as_millis() as u64;
-        let total = results.len();
-
-        Ok(SourceResults {
-            source_name: "Claude Code".to_string(),
-            results,
-            total_matched: total,
-            search_time_ms: elapsed,
-            error: None,
-        })
+        Ok(SourceResults::new(SourceKind::Claude, results, elapsed))
     }
 }
 
@@ -224,5 +232,104 @@ impl ClaudeSource {
         }
 
         String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_project_name_turns_dashes_into_slashes() {
+        assert_eq!(
+            ClaudeSource::decode_project_name("-Users-micn-code-staged"),
+            "/Users/micn/code/staged"
+        );
+    }
+
+    #[test]
+    fn extract_text_reads_string_and_block_content() {
+        let string_msg = serde_json::json!({"content": "hello there"});
+        assert_eq!(ClaudeSource::extract_text(Some(&string_msg)), "hello there");
+
+        let block_msg = serde_json::json!({
+            "content": [
+                {"type":"text","text":"line one"},
+                {"type":"tool_use","name":"x"},
+                {"type":"text","text":"line two"}
+            ]
+        });
+        assert_eq!(
+            ClaudeSource::extract_text(Some(&block_msg)),
+            "line one\nline two"
+        );
+
+        assert_eq!(ClaudeSource::extract_text(None), "");
+    }
+
+    fn write_claude_session(projects_dir: &std::path::Path) {
+        let project = projects_dir.join("-Users-micn-code-sandpit");
+        std::fs::create_dir_all(&project).unwrap();
+        let lines = [
+            r#"{"type":"user","timestamp":"2026-03-11T04:19:00Z","message":{"role":"user","content":"how do we do hooks and security"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-03-11T04:20:00Z","message":{"role":"assistant","content":[{"type":"text","text":"CLI agent tools handle hooks like this"}]}}"#,
+            r#"{"type":"summary","summary":"ignore me"}"#,
+        ];
+        std::fs::write(project.join("sess-1.jsonl"), lines.join("\n")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_finds_matches_and_decodes_project_path() {
+        let dir = tempfile::tempdir().unwrap();
+        write_claude_session(dir.path());
+        let source = ClaudeSource {
+            projects_dir: dir.path().to_path_buf(),
+        };
+
+        let query = RecallQuery {
+            keywords: vec!["hooks".to_string()],
+            ..Default::default()
+        };
+        let out = source.search(&query).await.unwrap();
+        assert_eq!(out.source, SourceKind::Claude);
+        assert_eq!(out.results.len(), 2);
+        // Project dir name is decoded back into a filesystem path.
+        assert!(out
+            .results
+            .iter()
+            .all(|r| r.session_name.as_deref() == Some("/Users/micn/code/sandpit")));
+        assert!(out.results.iter().all(|r| r.source == SourceKind::Claude));
+    }
+
+    #[tokio::test]
+    async fn search_applies_role_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        write_claude_session(dir.path());
+        let source = ClaudeSource {
+            projects_dir: dir.path().to_path_buf(),
+        };
+
+        let query = RecallQuery {
+            keywords: vec!["hooks".to_string()],
+            roles: vec![Role::User],
+            ..Default::default()
+        };
+        let out = source.search(&query).await.unwrap();
+        assert_eq!(out.results.len(), 1);
+        assert_eq!(out.results[0].role, Some(Role::User));
+    }
+
+    #[tokio::test]
+    async fn search_missing_dir_returns_empty() {
+        let source = ClaudeSource {
+            projects_dir: std::path::PathBuf::from("/nonexistent/path/xyz"),
+        };
+        let query = RecallQuery {
+            keywords: vec!["anything".to_string()],
+            ..Default::default()
+        };
+        let out = source.search(&query).await.unwrap();
+        assert!(out.results.is_empty());
+        assert!(out.error.is_none());
     }
 }

@@ -40,3 +40,7 @@ futures = "0.3"
 # MCP server
 rmcp = { version = "1.2", features = ["server", "transport-io"] }
 schemars = "1"
+
+[dev-dependencies]
+# Temp dirs for source fixture tests
+tempfile = "3"

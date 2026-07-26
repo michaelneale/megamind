@@ -4,15 +4,19 @@ mod mcp;
 mod query;
 mod results;
 mod sources;
+mod types;
 
 use chrono::{NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use engine::RecallEngine;
 use query::{MatchMode, RecallQuery};
+use types::{Role, SourceKind};
 
 #[derive(Parser)]
 #[command(name = "remember")]
-#[command(about = "Memory recall for agents — search across conversation histories and perception data")]
+#[command(
+    about = "Memory recall for agents — search across conversation histories and perception data"
+)]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -41,6 +45,16 @@ struct Cli {
     /// Maximum results per source
     #[arg(short, long, default_value = "20")]
     limit: usize,
+
+    /// Restrict to specific session types / sources (repeatable).
+    /// Valid: goose, claude, pi, codex, gemini, amp, opencode
+    #[arg(short, long, num_args = 1..)]
+    source: Vec<SourceKind>,
+
+    /// Restrict to specific message roles (repeatable).
+    /// Valid: user, assistant, system, tool
+    #[arg(short, long, num_args = 1..)]
+    role: Vec<Role>,
 
     /// Output format: text or json
     #[arg(short, long, default_value = "text")]
@@ -106,7 +120,11 @@ async fn main() -> anyhow::Result<()> {
     let after = cli.after.as_deref().map(parse_date).transpose()?;
     let before = cli.before.as_deref().map(parse_date).transpose()?;
 
-    let mode = if cli.any { MatchMode::Or } else { MatchMode::And };
+    let mode = if cli.any {
+        MatchMode::Or
+    } else {
+        MatchMode::And
+    };
 
     let query = RecallQuery {
         text: query_text,
@@ -115,6 +133,8 @@ async fn main() -> anyhow::Result<()> {
         before,
         limit: cli.limit,
         mode,
+        sources: cli.source,
+        roles: cli.role,
     };
 
     if !query.has_constraints() {

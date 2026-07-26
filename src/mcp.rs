@@ -1,15 +1,16 @@
 use rmcp::{
-    ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::io::stdio,
+    ServerHandler, ServiceExt,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::RecallEngine;
 use crate::query::{MatchMode, RecallQuery};
+use crate::types::{Role, SourceKind};
 
 /// Parameters for the remember tool.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -37,6 +38,16 @@ pub struct RememberParams {
     /// Match mode: "all" requires every term to match (default), "any" matches if any term is present
     #[serde(default)]
     pub mode: Option<String>,
+
+    /// Restrict to specific session types / sources. Valid values:
+    /// goose, claude, pi, codex, gemini, amp, opencode. Empty = all sources.
+    #[serde(default)]
+    pub sources: Vec<String>,
+
+    /// Restrict to specific message roles. Valid values:
+    /// user, assistant, system, tool. Empty = all roles.
+    #[serde(default)]
+    pub roles: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +75,7 @@ impl RememberServer {
     /// Search across agent conversation histories to recall past context.
     #[tool(
         name = "remember",
-        description = "Search across agent conversation histories (Goose, Claude Code, Pi, Codex, Gemini, Amp, OpenCode) to recall past context. Provide a free-text query and/or keyword filters. Returns matching conversation snippets with timestamps and source info."
+        description = "Search across agent conversation histories (Goose, Claude Code, Pi, Codex, Gemini, Amp, OpenCode) to recall past context. Provide a free-text query and/or keyword filters. Optionally narrow by session type via `sources` (e.g. [\"goose\",\"claude\"]) and by speaker via `roles` (e.g. [\"user\",\"assistant\"]). Returns matching conversation snippets with timestamps and source info."
     )]
     async fn remember(&self, Parameters(params): Parameters<RememberParams>) -> String {
         let after = match params.after.as_deref().map(parse_date) {
@@ -83,6 +94,26 @@ impl RememberServer {
             _ => MatchMode::And,
         };
 
+        let sources = match params
+            .sources
+            .iter()
+            .map(|s| s.parse::<SourceKind>())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(sources) => sources,
+            Err(e) => return format!("Error: {}", e),
+        };
+
+        let roles = match params
+            .roles
+            .iter()
+            .map(|r| r.parse::<Role>())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(roles) => roles,
+            Err(e) => return format!("Error: {}", e),
+        };
+
         let query = RecallQuery {
             text: params.query,
             keywords: params.keywords,
@@ -90,6 +121,8 @@ impl RememberServer {
             before,
             limit: params.limit.unwrap_or(20),
             mode,
+            sources,
+            roles,
         };
 
         if !query.has_constraints() {
