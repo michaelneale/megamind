@@ -1,6 +1,7 @@
 use crate::query::RecallQuery;
 use crate::results::{MemoryResult, SourceResults};
 use crate::sources::MemorySource;
+use crate::types::{Role, SourceKind};
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::Connection;
@@ -128,7 +129,8 @@ impl GooseSource {
 
         params.push(Box::new(query.limit as i64));
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
             let role: String = row.get(0)?;
@@ -138,7 +140,14 @@ impl GooseSource {
             let session_id: String = row.get(4)?;
             let session_name: Option<String> = row.get(5)?;
             let working_dir: Option<String> = row.get(6)?;
-            Ok((role, content_json, timestamp, session_id, session_name, working_dir))
+            Ok((
+                role,
+                content_json,
+                timestamp,
+                session_id,
+                session_name,
+                working_dir,
+            ))
         })?;
 
         let mut results = Vec::new();
@@ -154,6 +163,11 @@ impl GooseSource {
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
 
+            let role = Role::from_raw(&role);
+            if !query.wants_role(Some(&role)) {
+                continue;
+            }
+
             let (_, hit_count) = query.matches_text(&content);
             let relevance = hit_count as f64;
 
@@ -162,7 +176,7 @@ impl GooseSource {
                 .or(working_dir.filter(|w| !w.is_empty()));
 
             results.push(MemoryResult {
-                source: "goose".to_string(),
+                source: SourceKind::Goose,
                 timestamp,
                 content,
                 role: Some(role),
@@ -183,7 +197,10 @@ impl GooseSource {
         Ok(results)
     }
 
-    fn search_jsonl(sessions_dir: &PathBuf, query: &RecallQuery) -> anyhow::Result<Vec<MemoryResult>> {
+    fn search_jsonl(
+        sessions_dir: &PathBuf,
+        query: &RecallQuery,
+    ) -> anyhow::Result<Vec<MemoryResult>> {
         if query.search_terms().is_empty() && query.after.is_none() && query.before.is_none() {
             return Ok(vec![]);
         }
@@ -244,9 +261,13 @@ impl GooseSource {
                 }
 
                 let role = match entry.get("role").and_then(|v| v.as_str()) {
-                    Some(role @ ("user" | "assistant")) => role,
+                    Some(role @ ("user" | "assistant")) => Role::from_raw(role),
                     _ => continue,
                 };
+
+                if !query.wants_role(Some(&role)) {
+                    continue;
+                }
 
                 let timestamp = entry
                     .get("created")
@@ -276,10 +297,10 @@ impl GooseSource {
                 }
 
                 results.push(MemoryResult {
-                    source: "goose".to_string(),
+                    source: SourceKind::Goose,
                     timestamp,
                     content: text,
-                    role: Some(role.to_string()),
+                    role: Some(role),
                     session_id: Some(session_id.clone()),
                     session_name: session_name.clone(),
                     relevance: hit_count as f64,
@@ -310,8 +331,8 @@ impl GooseSource {
 
 #[async_trait]
 impl MemorySource for GooseSource {
-    fn name(&self) -> &str {
-        "Goose"
+    fn kind(&self) -> SourceKind {
+        SourceKind::Goose
     }
 
     fn is_available(&self) -> bool {
@@ -330,17 +351,160 @@ impl MemorySource for GooseSource {
                 Ok(results) => Ok(results),
                 Err(_) => GooseSource::search_jsonl(&sessions_dir, &query),
             }
-        }).await??;
+        })
+        .await??;
 
         let elapsed = start.elapsed().as_millis() as u64;
-        let total = results.len();
+        Ok(SourceResults::new(SourceKind::Goose, results, elapsed))
+    }
+}
 
-        Ok(SourceResults {
-            source_name: "Goose".to_string(),
-            results,
-            total_matched: total,
-            search_time_ms: elapsed,
-            error: None,
-        })
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::params;
+
+    fn query_for(terms: &[&str]) -> RecallQuery {
+        RecallQuery {
+            keywords: terms.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn extract_text_content_joins_text_blocks() {
+        let json = r#"[{"type":"text","text":"hello"},{"type":"image","url":"x"},{"type":"text","text":"world"}]"#;
+        assert_eq!(GooseSource::extract_text_content(json), "hello\nworld");
+    }
+
+    #[test]
+    fn extract_text_content_handles_plain_string() {
+        let json = r#""just a string""#;
+        assert_eq!(GooseSource::extract_text_content(json), "just a string");
+    }
+
+    #[test]
+    fn extract_text_content_falls_back_to_raw_on_garbage() {
+        // Not valid JSON — the raw text is still returned for keyword search.
+        assert_eq!(GooseSource::extract_text_content("not json"), "not json");
+    }
+
+    #[test]
+    fn extract_jsonl_text_reads_string_and_array_content() {
+        let string_entry = serde_json::json!({"content": "plain"});
+        assert_eq!(GooseSource::extract_jsonl_text(&string_entry), "plain");
+
+        let array_entry = serde_json::json!({
+            "content": [{"type":"text","text":"a"},{"type":"text","text":"b"}]
+        });
+        assert_eq!(GooseSource::extract_jsonl_text(&array_entry), "a\nb");
+
+        let no_content = serde_json::json!({"other": 1});
+        assert_eq!(GooseSource::extract_jsonl_text(&no_content), "");
+    }
+
+    /// Build a minimal Goose sessions.db matching the schema the search query
+    /// expects, then confirm search finds and normalizes rows.
+    fn write_goose_db(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT, working_dir TEXT);
+            CREATE TABLE messages (
+                session_id TEXT,
+                role TEXT,
+                content_json TEXT,
+                timestamp TEXT,
+                created_timestamp INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, name, working_dir) VALUES (?1, ?2, ?3)",
+            params!["s1", "My Session", "/work/dir"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content_json, timestamp, created_timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                "s1",
+                "assistant",
+                r#"[{"type":"text","text":"we discussed the sandbox approach"}]"#,
+                "2026-03-11T04:19:00Z",
+                1_772_000_000i64
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content_json, timestamp, created_timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                "s1",
+                "user",
+                r#"[{"type":"text","text":"unrelated chatter"}]"#,
+                "2026-03-11T04:20:00Z",
+                1_772_000_100i64
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn search_sqlite_finds_matches_and_normalizes_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        write_goose_db(&db);
+
+        let results = GooseSource::search_sqlite(&db, &query_for(&["sandbox"])).unwrap();
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.source, SourceKind::Goose);
+        assert_eq!(r.role, Some(Role::Assistant));
+        assert!(r.content.contains("sandbox"));
+        // session name prefers the human name over working_dir.
+        assert_eq!(r.session_name.as_deref(), Some("My Session"));
+    }
+
+    #[test]
+    fn search_sqlite_applies_role_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        write_goose_db(&db);
+
+        // Only the assistant message mentions "sandbox", so a user-role
+        // filter should exclude it.
+        let mut q = query_for(&["sandbox"]);
+        q.roles = vec![Role::User];
+        let results = GooseSource::search_sqlite(&db, &q).unwrap();
+        assert!(results.is_empty());
+
+        let mut q = query_for(&["sandbox"]);
+        q.roles = vec![Role::Assistant];
+        let results = GooseSource::search_sqlite(&db, &q).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_jsonl_parses_header_and_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("abc.jsonl");
+        let lines = [
+            r#"{"id":"sess-xyz","working_dir":"/proj/foo","description":"desc"}"#,
+            r#"{"role":"user","created":1772000000,"content":"how do we handle auth"}"#,
+            r#"{"role":"assistant","created":1772000100,"content":[{"type":"text","text":"use tokens for auth"}]}"#,
+        ];
+        std::fs::write(&session_file, lines.join("\n")).unwrap();
+
+        let results =
+            GooseSource::search_jsonl(&dir.path().to_path_buf(), &query_for(&["auth"])).unwrap();
+        assert_eq!(results.len(), 2);
+        // Header id + working_dir are threaded onto results.
+        assert!(results
+            .iter()
+            .all(|r| r.session_id.as_deref() == Some("sess-xyz")));
+        assert!(results
+            .iter()
+            .all(|r| r.session_name.as_deref() == Some("/proj/foo")));
+        assert!(results.iter().all(|r| r.source == SourceKind::Goose));
     }
 }

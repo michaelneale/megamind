@@ -1,6 +1,7 @@
 use crate::query::RecallQuery;
 use crate::results::{MemoryResult, SourceResults};
 use crate::sources::MemorySource;
+use crate::types::{Role, SourceKind};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
@@ -19,16 +20,22 @@ impl CodexSource {
         }
     }
 
-    fn extract_text(payload: &serde_json::Value) -> Option<(String, String)> {
+    fn extract_text(payload: &serde_json::Value) -> Option<(Role, String)> {
         // We only care about response_item with type=message
         if payload.get("type")?.as_str()? != "message" {
             return None;
         }
 
-        let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("unknown");
+        let role = Role::from_raw(
+            payload
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("unknown"),
+        );
 
-        // Skip developer/system messages (prompt scaffolding)
-        if role == "developer" || role == "system" {
+        // Skip system/developer messages (prompt scaffolding). Codex spells
+        // its scaffolding role "developer", which Role normalizes to System.
+        if matches!(role, Role::System) {
             return None;
         }
 
@@ -50,14 +57,14 @@ impl CodexSource {
             return None;
         }
 
-        Some((role.to_string(), joined))
+        Some((role, joined))
     }
 }
 
 #[async_trait]
 impl MemorySource for CodexSource {
-    fn name(&self) -> &str {
-        "Codex"
+    fn kind(&self) -> SourceKind {
+        SourceKind::Codex
     }
 
     fn is_available(&self) -> bool {
@@ -123,6 +130,10 @@ impl MemorySource for CodexSource {
                         None => continue,
                     };
 
+                    if !query.wants_role(Some(&role)) {
+                        continue;
+                    }
+
                     // Parse timestamp
                     let timestamp = entry
                         .get("timestamp")
@@ -149,7 +160,7 @@ impl MemorySource for CodexSource {
                     }
 
                     results.push(MemoryResult {
-                        source: "codex".to_string(),
+                        source: SourceKind::Codex,
                         timestamp,
                         content: text,
                         role: Some(role),
@@ -182,15 +193,7 @@ impl MemorySource for CodexSource {
         .await??;
 
         let elapsed = start.elapsed().as_millis() as u64;
-        let total = results.len();
-
-        Ok(SourceResults {
-            source_name: "Codex".to_string(),
-            results,
-            total_matched: total,
-            search_time_ms: elapsed,
-            error: None,
-        })
+        Ok(SourceResults::new(SourceKind::Codex, results, elapsed))
     }
 }
 
@@ -208,4 +211,84 @@ fn find_jsonl_files(dir: &PathBuf) -> Vec<PathBuf> {
         }
     }
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_text_maps_roles_and_skips_scaffolding() {
+        let assistant = serde_json::json!({
+            "type":"message","role":"assistant",
+            "content":[{"type":"output_text","text":"the answer"}]
+        });
+        let (role, text) = CodexSource::extract_text(&assistant).unwrap();
+        assert_eq!(role, Role::Assistant);
+        assert_eq!(text, "the answer");
+
+        let user = serde_json::json!({
+            "type":"message","role":"user",
+            "content":[{"type":"input_text","text":"the question"}]
+        });
+        assert_eq!(CodexSource::extract_text(&user).unwrap().0, Role::User);
+
+        // Codex prompt scaffolding uses the "developer" role -> System -> skipped.
+        let dev = serde_json::json!({
+            "type":"message","role":"developer",
+            "content":[{"type":"input_text","text":"scaffolding"}]
+        });
+        assert!(CodexSource::extract_text(&dev).is_none());
+
+        // Non-message payloads are ignored.
+        let other = serde_json::json!({"type":"reasoning","content":[]});
+        assert!(CodexSource::extract_text(&other).is_none());
+    }
+
+    #[test]
+    fn find_jsonl_files_recurses() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("2026").join("03");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("a.jsonl"), "{}").unwrap();
+        std::fs::write(dir.path().join("b.jsonl"), "{}").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "ignore").unwrap();
+
+        let found = find_jsonl_files(&dir.path().to_path_buf());
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|p| p.extension().unwrap() == "jsonl"));
+    }
+
+    fn write_codex_session(sessions_dir: &std::path::Path) {
+        let day = sessions_dir.join("2026").join("03").join("11");
+        std::fs::create_dir_all(&day).unwrap();
+        let lines = [
+            r#"{"type":"session_meta","payload":{"id":"codex-1","cwd":"/repo/thing"}}"#,
+            r#"{"type":"response_item","timestamp":"2026-03-11T04:19:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"error handling with Result"}]}}"#,
+            r#"{"type":"response_item","timestamp":"2026-03-11T04:20:00Z","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"error scaffolding"}]}}"#,
+        ];
+        std::fs::write(day.join("rollout.jsonl"), lines.join("\n")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_reads_session_meta_and_skips_developer() {
+        let dir = tempfile::tempdir().unwrap();
+        write_codex_session(dir.path());
+        let source = CodexSource {
+            sessions_dir: dir.path().to_path_buf(),
+        };
+
+        let query = RecallQuery {
+            keywords: vec!["error".to_string()],
+            ..Default::default()
+        };
+        let out = source.search(&query).await.unwrap();
+        assert_eq!(out.source, SourceKind::Codex);
+        // Only the assistant message survives; the developer one is scaffolding.
+        assert_eq!(out.results.len(), 1);
+        let r = &out.results[0];
+        assert_eq!(r.role, Some(Role::Assistant));
+        assert_eq!(r.session_id.as_deref(), Some("codex-1"));
+        assert_eq!(r.session_name.as_deref(), Some("/repo/thing"));
+    }
 }

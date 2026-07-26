@@ -1,3 +1,4 @@
+use crate::types::{Role, SourceKind};
 use chrono::{DateTime, Utc};
 
 /// Whether all search terms must match (AND) or any of them (OR)
@@ -24,6 +25,25 @@ pub struct RecallQuery {
     pub limit: usize,
     /// Whether to AND or OR the search terms
     pub mode: MatchMode,
+    /// Restrict to these session types (empty = all sources)
+    pub sources: Vec<SourceKind>,
+    /// Restrict to these roles (empty = all roles)
+    pub roles: Vec<Role>,
+}
+
+impl Default for RecallQuery {
+    fn default() -> Self {
+        Self {
+            text: None,
+            keywords: Vec::new(),
+            after: None,
+            before: None,
+            limit: 20,
+            mode: MatchMode::And,
+            sources: Vec::new(),
+            roles: Vec::new(),
+        }
+    }
 }
 
 impl RecallQuery {
@@ -77,7 +97,8 @@ impl RecallQuery {
         }
 
         let text_lower = text.to_lowercase();
-        let hit_count = terms.iter()
+        let hit_count = terms
+            .iter()
             .filter(|t| text_lower.contains(t.as_str()))
             .count();
 
@@ -91,12 +112,34 @@ impl RecallQuery {
 
     /// Returns true if there are any search constraints
     pub fn has_constraints(&self) -> bool {
-        self.text.is_some() || !self.keywords.is_empty() || self.after.is_some() || self.before.is_some()
+        self.text.is_some()
+            || !self.keywords.is_empty()
+            || self.after.is_some()
+            || self.before.is_some()
+    }
+
+    /// Whether the given source kind should be queried under this query's
+    /// `--source` filter. An empty filter matches every source.
+    pub fn wants_source(&self, source: SourceKind) -> bool {
+        self.sources.is_empty() || self.sources.contains(&source)
+    }
+
+    /// Whether a result with the given role passes this query's `--role`
+    /// filter. An empty filter matches every role; results with no role are
+    /// only kept when no role filter is active.
+    pub fn wants_role(&self, role: Option<&Role>) -> bool {
+        if self.roles.is_empty() {
+            return true;
+        }
+        match role {
+            Some(role) => self.roles.contains(role),
+            None => false,
+        }
     }
 
     /// Build a cache key from this query for result caching
     pub fn cache_key(&self) -> String {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
 
         let mut terms = self.search_terms();
@@ -117,6 +160,23 @@ impl RecallQuery {
         }
         hasher.update(self.limit.to_le_bytes());
 
+        // Fold in source/role filters so a narrowed query never collides with
+        // a broader cached result. Sort first so ordering is irrelevant.
+        let mut sources: Vec<&str> = self.sources.iter().map(|s| s.id()).collect();
+        sources.sort_unstable();
+        hasher.update(b"sources:");
+        for s in &sources {
+            hasher.update(s.as_bytes());
+            hasher.update(b",");
+        }
+        let mut roles: Vec<String> = self.roles.iter().map(|r| r.as_str().to_string()).collect();
+        roles.sort_unstable();
+        hasher.update(b"roles:");
+        for r in &roles {
+            hasher.update(r.as_bytes());
+            hasher.update(b",");
+        }
+
         hex::encode(hasher.finalize())
     }
 
@@ -133,14 +193,219 @@ impl RecallQuery {
             MatchMode::Or => " OR ",
         };
 
-        let conditions: Vec<String> = terms.iter()
-            .map(|_| format!("{} LIKE ?", column))
-            .collect();
+        let conditions: Vec<String> = terms.iter().map(|_| format!("{} LIKE ?", column)).collect();
 
-        let params: Vec<String> = terms.iter()
-            .map(|t| format!("%{}%", t))
-            .collect();
+        let params: Vec<String> = terms.iter().map(|t| format!("%{}%", t)).collect();
 
         (format!("({})", conditions.join(joiner)), params)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query_with_text(text: &str) -> RecallQuery {
+        RecallQuery {
+            text: Some(text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn search_terms_splits_words_and_lowercases() {
+        let q = query_with_text("Auth Approach");
+        assert_eq!(q.search_terms(), vec!["auth", "approach"]);
+    }
+
+    #[test]
+    fn search_terms_keeps_quoted_phrases_intact() {
+        let q = query_with_text("before \"exact phrase\" after");
+        let terms = q.search_terms();
+        assert!(terms.contains(&"exact phrase".to_string()));
+        assert!(terms.contains(&"before".to_string()));
+        assert!(terms.contains(&"after".to_string()));
+    }
+
+    #[test]
+    fn search_terms_merges_keywords_and_dedupes() {
+        let q = RecallQuery {
+            text: Some("rust sqlite".to_string()),
+            keywords: vec!["rust".to_string(), "SQLITE".to_string()],
+            ..Default::default()
+        };
+        let terms = q.search_terms();
+        assert_eq!(terms.iter().filter(|t| *t == "rust").count(), 1);
+        assert_eq!(terms.iter().filter(|t| *t == "sqlite").count(), 1);
+    }
+
+    #[test]
+    fn search_terms_handles_unclosed_quote() {
+        let q = query_with_text("start \"unclosed rest");
+        let terms = q.search_terms();
+        // Falls back to treating the remainder as individual words.
+        assert!(terms.contains(&"start".to_string()));
+        assert!(terms.contains(&"unclosed".to_string()));
+        assert!(terms.contains(&"rest".to_string()));
+    }
+
+    #[test]
+    fn matches_text_and_mode_requires_all_terms() {
+        let q = RecallQuery {
+            keywords: vec!["rust".to_string(), "sqlite".to_string()],
+            mode: MatchMode::And,
+            ..Default::default()
+        };
+        assert_eq!(q.matches_text("rust and sqlite together"), (true, 2));
+        assert!(!q.matches_text("rust only").0);
+    }
+
+    #[test]
+    fn matches_text_or_mode_requires_any_term() {
+        let q = RecallQuery {
+            keywords: vec!["rust".to_string(), "sqlite".to_string()],
+            mode: MatchMode::Or,
+            ..Default::default()
+        };
+        assert_eq!(q.matches_text("rust only"), (true, 1));
+        assert!(!q.matches_text("nothing here").0);
+    }
+
+    #[test]
+    fn matches_text_empty_query_matches_everything() {
+        let q = RecallQuery::default();
+        assert_eq!(q.matches_text("anything"), (true, 0));
+    }
+
+    #[test]
+    fn has_constraints_detects_each_dimension() {
+        assert!(!RecallQuery::default().has_constraints());
+        assert!(query_with_text("x").has_constraints());
+        assert!(RecallQuery {
+            keywords: vec!["k".to_string()],
+            ..Default::default()
+        }
+        .has_constraints());
+    }
+
+    #[test]
+    fn wants_source_respects_filter() {
+        let unfiltered = RecallQuery::default();
+        assert!(unfiltered.wants_source(SourceKind::Goose));
+        assert!(unfiltered.wants_source(SourceKind::Amp));
+
+        let filtered = RecallQuery {
+            sources: vec![SourceKind::Goose, SourceKind::Pi],
+            ..Default::default()
+        };
+        assert!(filtered.wants_source(SourceKind::Goose));
+        assert!(filtered.wants_source(SourceKind::Pi));
+        assert!(!filtered.wants_source(SourceKind::Amp));
+    }
+
+    #[test]
+    fn wants_role_respects_filter() {
+        let unfiltered = RecallQuery::default();
+        assert!(unfiltered.wants_role(Some(&Role::User)));
+        assert!(unfiltered.wants_role(None));
+
+        let filtered = RecallQuery {
+            roles: vec![Role::User],
+            ..Default::default()
+        };
+        assert!(filtered.wants_role(Some(&Role::User)));
+        assert!(!filtered.wants_role(Some(&Role::Assistant)));
+        // A role filter excludes results that have no role at all.
+        assert!(!filtered.wants_role(None));
+    }
+
+    #[test]
+    fn sql_like_clause_builds_parameterized_conditions() {
+        let q = RecallQuery {
+            keywords: vec!["rust".to_string(), "sqlite".to_string()],
+            mode: MatchMode::And,
+            ..Default::default()
+        };
+        let (clause, params) = q.sql_like_clause("m.content_json");
+        assert_eq!(clause, "(m.content_json LIKE ? AND m.content_json LIKE ?)");
+        assert_eq!(params, vec!["%rust%".to_string(), "%sqlite%".to_string()]);
+    }
+
+    #[test]
+    fn sql_like_clause_or_mode_uses_or_joiner() {
+        let q = RecallQuery {
+            keywords: vec!["a".to_string(), "b".to_string()],
+            mode: MatchMode::Or,
+            ..Default::default()
+        };
+        let (clause, _) = q.sql_like_clause("c");
+        assert_eq!(clause, "(c LIKE ? OR c LIKE ?)");
+    }
+
+    #[test]
+    fn cache_key_is_stable_and_order_independent() {
+        let a = RecallQuery {
+            keywords: vec!["rust".to_string(), "sqlite".to_string()],
+            ..Default::default()
+        };
+        let b = RecallQuery {
+            keywords: vec!["sqlite".to_string(), "rust".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(a.cache_key(), b.cache_key());
+    }
+
+    #[test]
+    fn cache_key_changes_with_mode() {
+        let and = RecallQuery {
+            keywords: vec!["a".to_string()],
+            mode: MatchMode::And,
+            ..Default::default()
+        };
+        let or = RecallQuery {
+            mode: MatchMode::Or,
+            ..and.clone()
+        };
+        assert_ne!(and.cache_key(), or.cache_key());
+    }
+
+    #[test]
+    fn cache_key_distinguishes_source_filter() {
+        let base = RecallQuery {
+            keywords: vec!["deploy".to_string()],
+            ..Default::default()
+        };
+        let filtered = RecallQuery {
+            sources: vec![SourceKind::Goose],
+            ..base.clone()
+        };
+        // A source-narrowed query must not collide with the broad query.
+        assert_ne!(base.cache_key(), filtered.cache_key());
+    }
+
+    #[test]
+    fn cache_key_distinguishes_role_filter() {
+        let base = RecallQuery {
+            keywords: vec!["deploy".to_string()],
+            ..Default::default()
+        };
+        let filtered = RecallQuery {
+            roles: vec![Role::User],
+            ..base.clone()
+        };
+        assert_ne!(base.cache_key(), filtered.cache_key());
+    }
+
+    #[test]
+    fn cache_key_source_filter_order_independent() {
+        let a = RecallQuery {
+            sources: vec![SourceKind::Goose, SourceKind::Pi],
+            ..Default::default()
+        };
+        let b = RecallQuery {
+            sources: vec![SourceKind::Pi, SourceKind::Goose],
+            ..Default::default()
+        };
+        assert_eq!(a.cache_key(), b.cache_key());
     }
 }

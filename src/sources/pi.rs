@@ -1,6 +1,7 @@
 use crate::query::RecallQuery;
 use crate::results::{MemoryResult, SourceResults};
 use crate::sources::MemorySource;
+use crate::types::{Role, SourceKind};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
@@ -22,8 +23,8 @@ impl PiSource {
 
 #[async_trait]
 impl MemorySource for PiSource {
-    fn name(&self) -> &str {
-        "Pi"
+    fn kind(&self) -> SourceKind {
+        SourceKind::Pi
     }
 
     fn is_available(&self) -> bool {
@@ -54,7 +55,11 @@ impl MemorySource for PiSource {
                     Err(_) => continue,
                 };
 
-                if !project_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if !project_entry
+                    .file_type()
+                    .map(|t| t.is_dir())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
 
@@ -83,7 +88,7 @@ impl MemorySource for PiSource {
                     // Extract session id and cwd from the session header line
                     let mut session_id = file_name.trim_end_matches(".jsonl").to_string();
                     let mut project_path: Option<String> = None;
-                    
+
                     for line in content.lines() {
                         let entry: serde_json::Value = match serde_json::from_str(line) {
                             Ok(v) => v,
@@ -108,7 +113,10 @@ impl MemorySource for PiSource {
                         }
 
                         // Parse timestamp
-                        let timestamp_str = entry.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+                        let timestamp_str = entry
+                            .get("timestamp")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
                         let timestamp = DateTime::parse_from_rfc3339(timestamp_str)
                             .map(|dt| dt.with_timezone(&Utc))
                             .unwrap_or_else(|_| Utc::now());
@@ -138,14 +146,20 @@ impl MemorySource for PiSource {
                             continue;
                         }
 
-                        let role = entry.get("message")
-                            .and_then(|m| m.get("role"))
-                            .and_then(|r| r.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
+                        let role = Role::from_raw(
+                            entry
+                                .get("message")
+                                .and_then(|m| m.get("role"))
+                                .and_then(|r| r.as_str())
+                                .unwrap_or("unknown"),
+                        );
+
+                        if !query.wants_role(Some(&role)) {
+                            continue;
+                        }
 
                         results.push(MemoryResult {
-                            source: "pi".to_string(),
+                            source: SourceKind::Pi,
                             timestamp,
                             content: text,
                             role: Some(role),
@@ -168,25 +182,19 @@ impl MemorySource for PiSource {
 
             // Sort by relevance then timestamp
             results.sort_by(|a, b| {
-                b.relevance.partial_cmp(&a.relevance)
+                b.relevance
+                    .partial_cmp(&a.relevance)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then(b.timestamp.cmp(&a.timestamp))
             });
 
             results.truncate(query.limit);
             Ok(results)
-        }).await??;
+        })
+        .await??;
 
         let elapsed = start.elapsed().as_millis() as u64;
-        let total = results.len();
-
-        Ok(SourceResults {
-            source_name: "Pi".to_string(),
-            results,
-            total_matched: total,
-            search_time_ms: elapsed,
-            error: None,
-        })
+        Ok(SourceResults::new(SourceKind::Pi, results, elapsed))
     }
 }
 
@@ -218,5 +226,79 @@ impl PiSource {
         }
 
         String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_text_reads_nested_message_content() {
+        let entry = serde_json::json!({
+            "message": {"content": [{"type":"text","text":"hi"},{"type":"text","text":"there"}]}
+        });
+        assert_eq!(PiSource::extract_text(&entry), "hi\nthere");
+
+        let string_entry = serde_json::json!({"message": {"content": "plain"}});
+        assert_eq!(PiSource::extract_text(&string_entry), "plain");
+
+        let empty = serde_json::json!({"other": 1});
+        assert_eq!(PiSource::extract_text(&empty), "");
+    }
+
+    fn write_pi_session(sessions_dir: &std::path::Path) {
+        let project = sessions_dir.join("proj-a");
+        std::fs::create_dir_all(&project).unwrap();
+        let lines = [
+            r#"{"type":"session","id":"sess-pi-1","cwd":"/Development/sandpit"}"#,
+            r#"{"type":"message","timestamp":"2026-03-17T05:40:00Z","message":{"role":"assistant","content":[{"type":"text","text":"sandpit wraps your agent with enforcement layers"}]}}"#,
+            r#"{"type":"message","timestamp":"2026-03-17T05:41:00Z","message":{"role":"user","content":"tell me more about sandpit"}}"#,
+        ];
+        std::fs::write(project.join("s.jsonl"), lines.join("\n")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_threads_session_header_onto_results() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pi_session(dir.path());
+        let source = PiSource {
+            sessions_dir: dir.path().to_path_buf(),
+        };
+
+        let query = RecallQuery {
+            keywords: vec!["sandpit".to_string()],
+            ..Default::default()
+        };
+        let out = source.search(&query).await.unwrap();
+        assert_eq!(out.source, SourceKind::Pi);
+        assert_eq!(out.results.len(), 2);
+        // The session header id and cwd are applied to every message.
+        assert!(out
+            .results
+            .iter()
+            .all(|r| r.session_id.as_deref() == Some("sess-pi-1")));
+        assert!(out
+            .results
+            .iter()
+            .all(|r| r.session_name.as_deref() == Some("/Development/sandpit")));
+    }
+
+    #[tokio::test]
+    async fn search_applies_role_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        write_pi_session(dir.path());
+        let source = PiSource {
+            sessions_dir: dir.path().to_path_buf(),
+        };
+
+        let query = RecallQuery {
+            keywords: vec!["sandpit".to_string()],
+            roles: vec![Role::Assistant],
+            ..Default::default()
+        };
+        let out = source.search(&query).await.unwrap();
+        assert_eq!(out.results.len(), 1);
+        assert_eq!(out.results[0].role, Some(Role::Assistant));
     }
 }

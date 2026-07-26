@@ -1,6 +1,7 @@
 use crate::query::RecallQuery;
 use crate::results::{MemoryResult, SourceResults};
 use crate::sources::MemorySource;
+use crate::types::{Role, SourceKind};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
@@ -44,8 +45,8 @@ impl GeminiSource {
 
 #[async_trait]
 impl MemorySource for GeminiSource {
-    fn name(&self) -> &str {
-        "Gemini"
+    fn kind(&self) -> SourceKind {
+        SourceKind::Gemini
     }
 
     fn is_available(&self) -> bool {
@@ -71,7 +72,11 @@ impl MemorySource for GeminiSource {
             };
 
             for project_entry in project_dirs.flatten() {
-                if !project_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if !project_entry
+                    .file_type()
+                    .map(|t| t.is_dir())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
 
@@ -113,12 +118,17 @@ impl MemorySource for GeminiSource {
                     for msg in messages {
                         let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-                        // Map gemini types to roles
+                        // Map gemini message types to normalized roles. Gemini
+                        // labels the model turn "gemini"; Role normalizes that
+                        // to Assistant.
                         let role = match msg_type {
-                            "user" => "user",
-                            "gemini" => "assistant",
+                            "user" | "gemini" => Role::from_raw(msg_type),
                             _ => continue,
                         };
+
+                        if !query.wants_role(Some(&role)) {
+                            continue;
+                        }
 
                         // Parse timestamp
                         let timestamp = msg
@@ -151,10 +161,10 @@ impl MemorySource for GeminiSource {
                         }
 
                         results.push(MemoryResult {
-                            source: "gemini".to_string(),
+                            source: SourceKind::Gemini,
                             timestamp,
                             content: text,
-                            role: Some(role.to_string()),
+                            role: Some(role),
                             session_id: Some(session_id.clone()),
                             session_name: Some(project_name.clone()),
                             relevance: hit_count as f64,
@@ -189,14 +199,89 @@ impl MemorySource for GeminiSource {
         .await??;
 
         let elapsed = start.elapsed().as_millis() as u64;
-        let total = results.len();
+        Ok(SourceResults::new(SourceKind::Gemini, results, elapsed))
+    }
+}
 
-        Ok(SourceResults {
-            source_name: "Gemini".to_string(),
-            results,
-            total_matched: total,
-            search_time_ms: elapsed,
-            error: None,
-        })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_message_text_reads_string_and_array() {
+        let string_msg = serde_json::json!({"content": "hi there"});
+        assert_eq!(GeminiSource::extract_message_text(&string_msg), "hi there");
+
+        let array_msg = serde_json::json!({
+            "content": [{"text":"one"},{"text":"two"}]
+        });
+        assert_eq!(GeminiSource::extract_message_text(&array_msg), "one\ntwo");
+
+        let empty = serde_json::json!({"other": 1});
+        assert_eq!(GeminiSource::extract_message_text(&empty), "");
+    }
+
+    fn write_gemini_chat(base_dir: &std::path::Path) {
+        let chats = base_dir.join("myproject").join("chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        let session = serde_json::json!({
+            "sessionId": "gem-1",
+            "messages": [
+                {"type":"user","timestamp":"2026-03-11T04:19:00Z","content":"what about distributed systems"},
+                {"type":"gemini","timestamp":"2026-03-11T04:20:00Z","content":[{"text":"distributed systems need consensus"}]},
+                {"type":"system","timestamp":"2026-03-11T04:21:00Z","content":"ignored type"}
+            ]
+        });
+        std::fs::write(
+            chats.join("chat.json"),
+            serde_json::to_string(&session).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_maps_gemini_role_to_assistant() {
+        let dir = tempfile::tempdir().unwrap();
+        write_gemini_chat(dir.path());
+        let source = GeminiSource {
+            base_dir: dir.path().to_path_buf(),
+        };
+
+        let query = RecallQuery {
+            keywords: vec!["distributed".to_string()],
+            ..Default::default()
+        };
+        let out = source.search(&query).await.unwrap();
+        assert_eq!(out.source, SourceKind::Gemini);
+        assert_eq!(out.results.len(), 2);
+        // The "gemini" message type normalizes to the Assistant role.
+        assert!(out.results.iter().any(|r| r.role == Some(Role::Assistant)));
+        assert!(out.results.iter().any(|r| r.role == Some(Role::User)));
+        assert!(out
+            .results
+            .iter()
+            .all(|r| r.session_id.as_deref() == Some("gem-1")));
+        assert!(out
+            .results
+            .iter()
+            .all(|r| r.session_name.as_deref() == Some("myproject")));
+    }
+
+    #[tokio::test]
+    async fn search_applies_role_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        write_gemini_chat(dir.path());
+        let source = GeminiSource {
+            base_dir: dir.path().to_path_buf(),
+        };
+
+        let query = RecallQuery {
+            keywords: vec!["distributed".to_string()],
+            roles: vec![Role::Assistant],
+            ..Default::default()
+        };
+        let out = source.search(&query).await.unwrap();
+        assert_eq!(out.results.len(), 1);
+        assert_eq!(out.results[0].role, Some(Role::Assistant));
     }
 }
