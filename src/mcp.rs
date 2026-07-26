@@ -39,6 +39,12 @@ pub struct RememberParams {
     #[serde(default)]
     pub mode: Option<String>,
 
+    /// Loose (substring) matching. Defaults to false, meaning terms match on
+    /// word boundaries (so "auth" won't match "authenticate"). Set true for
+    /// substring hits.
+    #[serde(default)]
+    pub loose: bool,
+
     /// Restrict to specific session types / sources. Valid values:
     /// goose, claude, pi, codex, gemini, amp, opencode. Empty = all sources.
     #[serde(default)]
@@ -123,6 +129,7 @@ impl RememberServer {
             mode,
             sources,
             roles,
+            loose: params.loose,
         };
 
         if !query.has_constraints() {

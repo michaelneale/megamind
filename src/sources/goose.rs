@@ -168,7 +168,13 @@ impl GooseSource {
                 continue;
             }
 
-            let (_, hit_count) = query.matches_text(&content);
+            // The SQL `LIKE` is only a coarse substring prefilter. Enforce the
+            // precise (word-boundary or loose) match here so the SQLite path
+            // agrees with the file-based sources.
+            let (matches, hit_count) = query.matches_text(&content);
+            if !query.search_terms().is_empty() && !matches {
+                continue;
+            }
             let relevance = hit_count as f64;
 
             let display_name = session_name

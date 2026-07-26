@@ -34,6 +34,11 @@ struct Cli {
     #[arg(long)]
     any: bool,
 
+    /// Loose (substring) matching. By default terms match on word boundaries
+    /// (so `auth` won't match `authenticate`); pass --loose for substring hits.
+    #[arg(long)]
+    loose: bool,
+
     /// Only return results after this date (YYYY-MM-DD)
     #[arg(long)]
     after: Option<String>,
@@ -135,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
         mode,
         sources: cli.source,
         roles: cli.role,
+        loose: cli.loose,
     };
 
     if !query.has_constraints() {
