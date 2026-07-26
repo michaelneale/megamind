@@ -29,6 +29,9 @@ pub struct RecallQuery {
     pub sources: Vec<SourceKind>,
     /// Restrict to these roles (empty = all roles)
     pub roles: Vec<Role>,
+    /// Loose (substring) matching. When false (default), terms must match on
+    /// word boundaries so `auth` no longer matches `authenticate`.
+    pub loose: bool,
 }
 
 impl Default for RecallQuery {
@@ -42,8 +45,58 @@ impl Default for RecallQuery {
             mode: MatchMode::And,
             sources: Vec::new(),
             roles: Vec::new(),
+            loose: false,
         }
     }
+}
+
+/// A "word character" for boundary detection: Unicode alphanumerics plus `_`,
+/// matching the conventional regex `\w` class.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether `term` occurs in `haystack` respecting word boundaries. Both inputs
+/// are expected to already be lowercased. `term` may contain interior spaces
+/// (a quoted phrase); only its outer edges are boundary-checked.
+///
+/// A boundary is enforced on an edge only when that edge of the term is itself
+/// a word character — so punctuation-bearing terms (e.g. `c++`) still match.
+fn contains_word_bounded(haystack: &str, term: &str) -> bool {
+    let first = match term.chars().next() {
+        Some(c) => c,
+        None => return false,
+    };
+    let last = term.chars().next_back().unwrap();
+    let check_left = is_word_char(first);
+    let check_right = is_word_char(last);
+
+    for (idx, matched) in haystack.match_indices(term) {
+        let left_ok = idx == 0
+            || !check_left
+            || !haystack[..idx]
+                .chars()
+                .next_back()
+                .map(is_word_char)
+                .unwrap_or(false);
+        if !left_ok {
+            continue;
+        }
+
+        let end = idx + matched.len();
+        let right_ok = end >= haystack.len()
+            || !check_right
+            || !haystack[end..]
+                .chars()
+                .next()
+                .map(is_word_char)
+                .unwrap_or(false);
+        if right_ok {
+            return true;
+        }
+    }
+
+    false
 }
 
 impl RecallQuery {
@@ -90,6 +143,9 @@ impl RecallQuery {
 
     /// Check if a piece of text matches this query's search terms
     /// respecting the AND/OR mode. Returns (matches, hit_count).
+    ///
+    /// By default terms must match on word boundaries; `loose` restores plain
+    /// substring matching.
     pub fn matches_text(&self, text: &str) -> (bool, usize) {
         let terms = self.search_terms();
         if terms.is_empty() {
@@ -99,7 +155,7 @@ impl RecallQuery {
         let text_lower = text.to_lowercase();
         let hit_count = terms
             .iter()
-            .filter(|t| text_lower.contains(t.as_str()))
+            .filter(|t| self.term_matches(&text_lower, t))
             .count();
 
         let matches = match self.mode {
@@ -108,6 +164,16 @@ impl RecallQuery {
         };
 
         (matches, hit_count)
+    }
+
+    /// Whether a single (already-lowercased) term matches the (already-
+    /// lowercased) text, honoring the query's `loose` setting.
+    fn term_matches(&self, text_lower: &str, term: &str) -> bool {
+        if self.loose {
+            text_lower.contains(term)
+        } else {
+            contains_word_bounded(text_lower, term)
+        }
     }
 
     /// Returns true if there are any search constraints
@@ -152,6 +218,12 @@ impl RecallQuery {
             MatchMode::And => hasher.update(b"AND"),
             MatchMode::Or => hasher.update(b"OR"),
         };
+        // Loose vs word-boundary matching yields different results.
+        hasher.update(if self.loose {
+            b"loose".as_slice()
+        } else {
+            b"strict".as_slice()
+        });
         if let Some(ref after) = self.after {
             hasher.update(after.to_rfc3339().as_bytes());
         }
@@ -275,6 +347,72 @@ mod tests {
     fn matches_text_empty_query_matches_everything() {
         let q = RecallQuery::default();
         assert_eq!(q.matches_text("anything"), (true, 0));
+    }
+
+    #[test]
+    fn word_boundary_is_the_default() {
+        let q = RecallQuery {
+            keywords: vec!["auth".to_string()],
+            ..Default::default()
+        };
+        // Whole-word hit.
+        assert!(q.matches_text("what auth approach").0);
+        // Substring-only occurrences must NOT match by default.
+        assert!(!q.matches_text("we authenticate users").0);
+        assert!(!q.matches_text("the author wrote").0);
+    }
+
+    #[test]
+    fn word_boundary_respects_punctuation_edges() {
+        let q = RecallQuery {
+            keywords: vec!["auth".to_string()],
+            ..Default::default()
+        };
+        // Adjacent punctuation is a boundary, so these still match.
+        assert!(q.matches_text("(auth)").0);
+        assert!(q.matches_text("auth.rs uses it").0);
+        assert!(q.matches_text("re-auth, please").0);
+    }
+
+    #[test]
+    fn loose_mode_restores_substring_matching() {
+        let q = RecallQuery {
+            keywords: vec!["auth".to_string()],
+            loose: true,
+            ..Default::default()
+        };
+        assert!(q.matches_text("we authenticate users").0);
+        assert!(q.matches_text("the author wrote").0);
+    }
+
+    #[test]
+    fn word_boundary_applies_to_quoted_phrases() {
+        let q = RecallQuery {
+            text: Some("\"auth token\"".to_string()),
+            ..Default::default()
+        };
+        assert!(q.matches_text("the auth token expired").0);
+        // Phrase boundary respected on the right edge.
+        assert!(!q.matches_text("auth tokenizer").0);
+    }
+
+    #[test]
+    fn word_boundary_matches_terms_with_symbols() {
+        // A term whose edges are non-word chars should not demand a boundary
+        // there, so symbol-bearing terms still match.
+        assert!(contains_word_bounded("i love c++ a lot", "c++"));
+        assert!(contains_word_bounded("prefix .env suffix", ".env"));
+    }
+
+    #[test]
+    fn word_boundary_unicode_aware() {
+        let q = RecallQuery {
+            keywords: vec!["café".to_string()],
+            ..Default::default()
+        };
+        assert!(q.matches_text("at the café today").0);
+        // Extra combining/adjacent word char defeats the boundary.
+        assert!(!q.matches_text("cafés everywhere").0);
     }
 
     #[test]
