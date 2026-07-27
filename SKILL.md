@@ -39,5 +39,6 @@ remember sources
 - `-l <n>` — Max results per source (default: 20)
 - `-s <source>` — Restrict to session types: goose, claude, pi, codex, gemini, amp, opencode (repeatable)
 - `-r <role>` — Restrict to message roles: user, assistant, system, tool (repeatable)
+- `--loose` — Substring matching (default is word-boundary, so `-k auth` won't match `authenticate`)
 - `-f json` — JSON output
 - `--any` — OR mode instead of AND

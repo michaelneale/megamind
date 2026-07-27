@@ -43,6 +43,7 @@ remember sources
 - `-l <n>` — Max results per source (default: 20)
 - `-s <source>` — Restrict to session types: goose, claude, pi, codex, gemini, amp, opencode (repeatable)
 - `-r <role>` — Restrict to message roles: user, assistant, system, tool (repeatable)
+- `--loose` — Substring matching (default is word-boundary, so `-k auth` won't match `authenticate`)
 - `-f json` — JSON output (useful for programmatic parsing)
 - `--any` — OR mode instead of AND (default is AND)
 
@@ -51,5 +52,5 @@ remember sources
 - Use `-f json` when you need to parse results programmatically
 - Combine free-text with `-k` keywords for precise filtering
 - Add date ranges to narrow down recent vs. old results
-- Results are cached for 5 minutes — identical queries return instantly
+- Results are cached on disk — repeat queries return instantly (cache is size-bounded, not time-expired; `remember clear-cache` wipes it)
 - `remember sources` shows which agent histories are available on this machine
