@@ -32,8 +32,11 @@ jobs:
             os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
+          # Cross-compiled from the arm64 runner: the macos-13 Intel runners are
+          # scarce/deprecated, and Apple-to-Apple cross-compilation is supported
+          # (verified locally, including rusqlite's bundled C SQLite).
           - name: darwin-x64
-            os: macos-13
+            os: macos-14
             target: x86_64-apple-darwin
             archive: tar.gz
           - name: linux-x64
