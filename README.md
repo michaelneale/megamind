@@ -76,10 +76,13 @@ remember sources
 remember clear-cache
 ```
 
-Flags: `-k` keyword (repeatable), `--after`/`--before` date range, `-l` limit per source (default 20), `-s`/`--source` restrict to session types (repeatable), `-r`/`--role` restrict to message roles (repeatable), `-f json` for machine output, `--any` for OR mode (default AND).
+Flags: `-k` keyword (repeatable), `--after`/`--before` date range, `-l` limit per source (default 20), `-s`/`--source` restrict to session types (repeatable), `-r`/`--role` restrict to message roles (repeatable), `--loose` for substring matching, `-f json` for machine output, `--any` for OR mode (default AND).
 
 - `--source` accepts: `goose`, `claude`, `pi`, `codex`, `gemini`, `amp`, `opencode`.
 - `--role` accepts: `user`, `assistant`, `system`, `tool`. Roles are normalized across agents (e.g. Gemini's `gemini` turn and Codex's `developer` scaffolding map to `assistant` and `system`).
+- Matching is **word-boundary** by default, so `-k auth` won't match `authenticate` or `author`. Pass `--loose` for substring matching. Symbol-bearing terms like `c++` still match.
+
+Results are cached on disk (under your cache dir, e.g. `~/.cache/remember/`) so repeat queries return instantly. The cache has no time expiry — it's bounded by size (500 MB, oldest entries evicted first). Run `remember clear-cache` to wipe it.
 
 ## Sources
 
@@ -116,7 +119,7 @@ Add it to your MCP client config:
 }
 ```
 
-The tool accepts `query`, `keywords`, `after`, `before`, `limit`, `mode` (`"all"` or `"any"`), `sources` (e.g. `["goose", "claude"]`), and `roles` (e.g. `["user", "assistant"]`) — same parameters as the CLI.
+The tool accepts `query`, `keywords`, `after`, `before`, `limit`, `mode` (`"all"` or `"any"`), `sources` (e.g. `["goose", "claude"]`), `roles` (e.g. `["user", "assistant"]`), and `loose` (`true` for substring matching) — same parameters as the CLI.
 
 ## Adding Sources
 
