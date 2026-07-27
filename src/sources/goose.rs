@@ -8,6 +8,14 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// Upper bound on how many candidate rows/messages either Goose path will
+/// materialize before precise filtering. This is a memory-safety backstop so a
+/// broad date-only query can't pull an entire large history into memory — it is
+/// deliberately far above any sane `--limit`. The user-facing `query.limit` is
+/// applied only *after* filtering and relevance sorting, so it means "max
+/// results returned", not "max rows scanned".
+const MAX_CANDIDATE_ROWS: usize = 50_000;
+
 /// Goose conversation history stored in SQLite
 pub struct GooseSource {
     db_path: PathBuf,
@@ -127,7 +135,13 @@ impl GooseSource {
             where_clause
         );
 
-        params.push(Box::new(query.limit as i64));
+        // Bind the SQL LIMIT to the safety cap, NOT query.limit: rows are
+        // dropped by post-query filters (empty text extraction, role, precise
+        // word-boundary match against extracted text vs the coarse content_json
+        // LIKE), and results are ranked by relevance rather than SQL's timestamp
+        // order. Applying query.limit here would spend the budget on recent
+        // candidates before filtering/ranking, so small limits under-return.
+        params.push(Box::new(MAX_CANDIDATE_ROWS as i64));
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
@@ -199,6 +213,7 @@ impl GooseSource {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(b.timestamp.cmp(&a.timestamp))
         });
+        results.truncate(query.limit);
 
         Ok(results)
     }
@@ -313,12 +328,16 @@ impl GooseSource {
                     metadata: None,
                 });
 
-                if results.len() >= query.limit * 4 {
+                // Stop only at the memory-safety cap. A `limit * 4` break here
+                // would truncate by file/scan order *before* the relevance sort
+                // below, dropping the most relevant matches when they appear
+                // late. query.limit is applied after ranking instead.
+                if results.len() >= MAX_CANDIDATE_ROWS {
                     break;
                 }
             }
 
-            if results.len() >= query.limit * 4 {
+            if results.len() >= MAX_CANDIDATE_ROWS {
                 break;
             }
         }
@@ -488,6 +507,179 @@ mod tests {
         q.roles = vec![Role::Assistant];
         let results = GooseSource::search_sqlite(&db, &q).unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    /// Insert a single message row.
+    fn insert_msg(conn: &Connection, session_id: &str, role: &str, content_json: &str, ts: &str) {
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content_json, timestamp, created_timestamp) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, role, content_json, ts, 0i64],
+        )
+        .unwrap();
+    }
+
+    /// Build a DB that reproduces issue #5: many *recent* rows that match the
+    /// SQL `LIKE` prefilter (the term lives inside a tool-call payload) but
+    /// extract to empty text and get dropped by the Rust post-filters, plus a
+    /// few genuine matches with *older* timestamps.
+    fn write_goose_db_limit_fixture(path: &std::path::Path, decoys: usize, reals: usize) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT, working_dir TEXT);
+            CREATE TABLE messages (
+                session_id TEXT, role TEXT, content_json TEXT,
+                timestamp TEXT, created_timestamp INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, name, working_dir) VALUES ('s1', 'S', '/w')",
+            [],
+        )
+        .unwrap();
+
+        // Decoys at recent timestamps (05:xx): match `LIKE '%recipe%'` only
+        // inside a tool call, so extracted text is empty -> dropped after SQL.
+        for i in 0..decoys {
+            let ts = format!("2026-03-11T05:{:02}:00Z", i % 60);
+            insert_msg(
+                &conn,
+                "s1",
+                "assistant",
+                r#"[{"type":"toolRequest","toolCall":{"name":"load_recipe","arguments":{}}}]"#,
+                &ts,
+            );
+        }
+        // Genuine matches at older timestamps (04:xx): "recipe" in real text.
+        for i in 0..reals {
+            let ts = format!("2026-03-11T04:{:02}:00Z", i % 60);
+            insert_msg(
+                &conn,
+                "s1",
+                "assistant",
+                r#"[{"type":"text","text":"the recipe we discussed"}]"#,
+                &ts,
+            );
+        }
+    }
+
+    #[test]
+    fn search_sqlite_limit_counts_results_not_scanned_rows() {
+        // Regression for issue #5: 20 recent decoy rows that match the SQL LIKE
+        // but extract to empty, plus 3 genuine older matches. A small --limit
+        // must still return all 3 real results rather than spending its budget
+        // on the most-recent decoy rows (which returned 0 before the fix).
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        write_goose_db_limit_fixture(&db, 20, 3);
+
+        let mut q = query_for(&["recipe"]);
+        q.limit = 10;
+        let results = GooseSource::search_sqlite(&db, &q).unwrap();
+        assert_eq!(
+            results.len(),
+            3,
+            "should return all 3 real matches despite 20 more-recent decoys"
+        );
+        assert!(results.iter().all(|r| r.content.contains("recipe")));
+    }
+
+    #[test]
+    fn search_sqlite_truncates_to_limit_after_filtering() {
+        // When genuine matches exceed the limit, exactly `limit` are returned.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        write_goose_db_limit_fixture(&db, 5, 8);
+
+        let mut q = query_for(&["recipe"]);
+        q.limit = 4;
+        let results = GooseSource::search_sqlite(&db, &q).unwrap();
+        assert_eq!(results.len(), 4);
+    }
+
+    #[test]
+    fn search_sqlite_ranks_by_relevance_across_all_candidates() {
+        // The most relevant row (2 term hits) is the OLDEST. Ranking must span
+        // every candidate, not just the most-recent `limit`, so it ranks first.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT, working_dir TEXT);
+            CREATE TABLE messages (
+                session_id TEXT, role TEXT, content_json TEXT,
+                timestamp TEXT, created_timestamp INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, name, working_dir) VALUES ('s1', 'S', '/w')",
+            [],
+        )
+        .unwrap();
+        // Oldest row matches both terms; newer rows match only one.
+        insert_msg(
+            &conn,
+            "s1",
+            "assistant",
+            r#"[{"type":"text","text":"the recipe and the deploy plan"}]"#,
+            "2026-03-11T04:00:00Z",
+        );
+        for i in 1..10 {
+            let ts = format!("2026-03-11T05:{:02}:00Z", i);
+            insert_msg(
+                &conn,
+                "s1",
+                "assistant",
+                r#"[{"type":"text","text":"just a recipe note"}]"#,
+                &ts,
+            );
+        }
+
+        let mut q = query_for(&["recipe", "deploy"]);
+        q.mode = crate::query::MatchMode::Or;
+        q.limit = 20;
+        let results = GooseSource::search_sqlite(&db, &q).unwrap();
+        assert!(results.len() >= 2);
+        assert_eq!(results[0].relevance, 2.0, "2-hit row should rank first");
+        assert!(results[0].content.contains("deploy"));
+    }
+
+    #[test]
+    fn search_jsonl_ranks_by_relevance_across_all_matches() {
+        // Regression for issue #5 (JSONL path): the old `limit * 4` break
+        // stopped scanning by file order before ranking, so a highly-relevant
+        // match appearing late was missed. It must now be found and rank first.
+        let dir = tempfile::tempdir().unwrap();
+        let mut lines = vec![r#"{"working_dir":"/w","id":"s1"}"#.to_string()];
+        // 10 one-hit matches first (well past the old limit*4 cutoff)...
+        for _ in 0..10 {
+            lines.push(
+                r#"{"role":"assistant","created":1772000000,"content":[{"type":"text","text":"a recipe note"}]}"#
+                    .to_string(),
+            );
+        }
+        // ...then the two-hit match last.
+        lines.push(
+            r#"{"role":"assistant","created":1772000001,"content":[{"type":"text","text":"the recipe and deploy plan"}]}"#
+                .to_string(),
+        );
+        std::fs::write(dir.path().join("s1.jsonl"), lines.join("\n")).unwrap();
+
+        let mut q = query_for(&["recipe", "deploy"]);
+        q.mode = crate::query::MatchMode::Or;
+        q.limit = 1;
+        let results = GooseSource::search_jsonl(&dir.path().to_path_buf(), &q).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].relevance, 2.0,
+            "the late two-hit match must win despite appearing last"
+        );
+        assert!(results[0].content.contains("deploy"));
     }
 
     #[test]
